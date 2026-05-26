@@ -1,0 +1,54 @@
+{# Shared formatting helpers. Reused across dashboard / positions / history. #}
+
+{% macro money(v) -%}
+  {%- if v is none -%}
+    <span class="text-slate-500">&mdash;</span>
+  {%- else -%}
+    {%- set rounded = v|round(2) -%}
+    {%- if v >= 0 -%}
+      <span class="text-emerald-400">&#8377;{{ "{:,.2f}".format(rounded) }}</span>
+    {%- else -%}
+      <span class="text-rose-400">&minus;&#8377;{{ "{:,.2f}".format(-rounded) }}</span>
+    {%- endif -%}
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro pct(v) -%}
+  {%- if v is none -%}
+    <span class="text-slate-500">&mdash;</span>
+  {%- elif v >= 0 -%}
+    <span class="text-emerald-400">+{{ "{:.2f}".format(v) }}%</span>
+  {%- else -%}
+    <span class="text-rose-400">{{ "{:.2f}".format(v) }}%</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro num(v, digits=2) -%}
+  {%- if v is none -%}
+    <span class="text-slate-500">&mdash;</span>
+  {%- else -%}
+    {{ "{:,.{}f}".format(v, digits) }}
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro side_badge(side) -%}
+  {%- if side == 'BUY' -%}
+    <span class="inline-block px-2 py-0.5 text-xs rounded bg-emerald-500/15 text-emerald-300 border border-emerald-700">{{ side }}</span>
+  {%- elif side == 'SELL' -%}
+    <span class="inline-block px-2 py-0.5 text-xs rounded bg-rose-500/15 text-rose-300 border border-rose-700">{{ side }}</span>
+  {%- else -%}
+    <span class="inline-block px-2 py-0.5 text-xs rounded bg-slate-700 text-slate-200">{{ side }}</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro status_badge(s) -%}
+  {%- set cls = {
+        'pending':  'bg-sky-500/15 text-sky-200 border-sky-700',
+        'executed': 'bg-emerald-500/15 text-emerald-200 border-emerald-700',
+        'skipped':  'bg-slate-600/40 text-slate-200 border-slate-600',
+        'failed':   'bg-rose-500/15 text-rose-200 border-rose-700',
+        'open':     'bg-amber-500/15 text-amber-200 border-amber-700',
+        'closed':   'bg-slate-600/40 text-slate-200 border-slate-600'
+      }.get(s, 'bg-slate-700 text-slate-200 border-slate-600') -%}
+  <span class="inline-block px-2 py-0.5 text-xs rounded border {{ cls }}">{{ s }}</span>
+{%- endmacro %}

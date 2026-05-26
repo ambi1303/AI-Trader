@@ -1,0 +1,49 @@
+# Realistic Indian equity cost model used by backtester (Week 4) and the
+# risk/signal layer (Week 5). Defaults reflect a discount broker
+# (Zerodha-style) for Equity Delivery / CNC.
+#
+# IMPORTANT: All "_pct" fields below are fractions (0.0003 = 0.03% = 3 bps).
+# Slippage fields used to be in percent units; they have been normalised to
+# fractions for consistency. Per-stock slippage overrides apply on top of the
+# default; thinner names should set higher values.
+
+defaults:
+  segment: "EQ_DELIVERY"
+  brokerage:
+    type: "flat_or_pct_lower"          # cost_per_leg = min(flat, pct * notional)
+    flat_rupees: 0                      # delivery on most discount brokers is free
+    pct: 0.0003                         # 0.03%
+  stt:
+    buy_pct: 0.0
+    sell_pct: 0.001                     # 0.1% on sell side, delivery
+  exchange_txn_pct: 0.0000325           # NSE
+  sebi_charges_per_crore_rupees: 10
+  stamp_duty_buy_pct: 0.00015
+  gst_pct_on_brokerage_and_txn: 0.18
+  slippage_pct_default: 0.0005          # 0.05% (5 bps) one-leg
+
+intraday_overrides:
+  segment: "EQ_INTRADAY"
+  brokerage:
+    type: "flat_or_pct_lower"
+    flat_rupees: 20
+    pct: 0.0003
+  stt:
+    buy_pct: 0.0
+    sell_pct: 0.00025                   # 0.025% sell side intraday
+  slippage_pct_default: 0.0004          # 0.04% (4 bps) one-leg
+
+per_stock_slippage_pct:
+  # Tune from observed bid-ask spreads. All values are fractions.
+  # Liquid large caps:
+  RELIANCE: 0.0003
+  HDFCBANK: 0.0003
+  TCS:      0.0003
+  INFY:     0.0003
+  ICICIBANK: 0.0003
+  SBIN:     0.0004
+  ITC:      0.0004
+  # Thinner names:
+  ZOMATO:   0.0006
+  TRENT:    0.0006
+  ADANIENT: 0.0008

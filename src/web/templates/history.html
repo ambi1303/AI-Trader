@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}History &middot; AI Trader{% endblock %}
+
+{% block content %}
+<section class="space-y-6">
+
+  <h1 class="text-2xl font-semibold tracking-tight">Trade history</h1>
+
+  {% set total_pnl = 0.0 %}
+  {% set wins      = 0 %}
+  {% for t in closed %}
+    {% set total_pnl = total_pnl + t.net_pnl %}
+    {% if t.net_pnl > 0 %}{% set wins = wins + 1 %}{% endif %}
+  {% endfor %}
+
+  <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs text-slate-400">Trades</div>
+      <div class="text-2xl font-semibold mt-1">{{ closed|length }}</div>
+    </div>
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs text-slate-400">Wins</div>
+      <div class="text-2xl font-semibold mt-1">{{ wins }}</div>
+    </div>
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs text-slate-400">Win rate</div>
+      <div class="text-2xl font-semibold mt-1">
+        {%- if closed -%}
+          {{ "{:.1f}".format((wins / closed|length) * 100.0) }}%
+        {%- else -%}—{%- endif -%}
+      </div>
+    </div>
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs text-slate-400">Total P&amp;L</div>
+      <div class="text-2xl font-semibold mt-1">{{ m.money(total_pnl) }}</div>
+    </div>
+  </div>
+
+  <section class="bg-slate-900 border border-slate-800 rounded-xl">
+    <header class="px-4 py-3 border-b border-slate-800">
+      <h2 class="font-medium">Closed trades (last 120 days)</h2>
+    </header>
+    {% if closed %}
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="text-xs uppercase text-slate-400">
+          <tr>
+            <th class="text-left  px-4 py-2">Symbol</th>
+            <th class="text-left  px-4 py-2">Entry</th>
+            <th class="text-left  px-4 py-2">Exit</th>
+            <th class="text-right px-4 py-2">P&amp;L</th>
+            <th class="text-right px-4 py-2 hidden sm:table-cell">P&amp;L %</th>
+            <th class="text-left  px-4 py-2 hidden md:table-cell">Reason</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-800">
+          {% for t in closed %}
+          <tr class="hover:bg-slate-800/40">
+            <td class="px-4 py-2 font-medium">{{ t.symbol }}</td>
+            <td class="px-4 py-2 tabular-nums">{{ t.entry_date }}</td>
+            <td class="px-4 py-2 tabular-nums">{{ t.exit_date }}</td>
+            <td class="px-4 py-2 text-right tabular-nums">{{ m.money(t.net_pnl) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums hidden sm:table-cell">{{ m.pct(t.pnl_pct) }}</td>
+            <td class="px-4 py-2 hidden md:table-cell text-slate-400">{{ t.exit_reason }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="px-4 py-6 text-sm text-slate-400">No trades on file.</div>
+    {% endif %}
+  </section>
+
+</section>
+{% endblock %}

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Sign in &middot; AI Trader{% endblock %}
+{% block content %}
+<div class="min-h-[70vh] flex items-center justify-center">
+  <form method="post" action="/login"
+        class="w-full max-w-sm bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4 shadow-xl">
+    <div class="text-center">
+      <div class="text-2xl font-semibold tracking-tight">Sign in</div>
+      <div class="text-sm text-slate-400 mt-1">AI Trader dashboard</div>
+    </div>
+
+    {% if error %}
+      {# Jinja2 auto-escapes this; query-string can't inject HTML. #}
+      <div class="text-sm bg-rose-950/50 border border-rose-800 text-rose-200 rounded px-3 py-2">
+        {{ error }}
+      </div>
+    {% endif %}
+
+    <label class="block">
+      <span class="text-xs uppercase tracking-wide text-slate-400">Username</span>
+      <input type="text" name="username" required autofocus autocomplete="username"
+             class="mt-1 block w-full bg-slate-950 border border-slate-700 rounded px-3 py-2
+                    focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+    </label>
+
+    <label class="block">
+      <span class="text-xs uppercase tracking-wide text-slate-400">Password</span>
+      <input type="password" name="password" required autocomplete="current-password"
+             class="mt-1 block w-full bg-slate-950 border border-slate-700 rounded px-3 py-2
+                    focus:outline-none focus:ring-2 focus:ring-emerald-500" />
+    </label>
+
+    <button type="submit"
+            class="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-900
+                   font-medium rounded py-2.5 transition">
+      Continue
+    </button>
+  </form>
+</div>
+{% endblock %}

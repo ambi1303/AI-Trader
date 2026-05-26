@@ -1,0 +1,18 @@
+symbol,ex_date,action_type,ratio_from,ratio_to,amount,notes
+# Used by data_validation/split_audit.py AND by data_validation/cross_source_check.py.
+#
+# IMPORTANT: This file MUST contain *every* split/bonus that occurs within the
+# date range you ingest. yfinance auto-adjusts Close retroactively for splits
+# and bonuses (regardless of auto_adjust=True/False). If a recent action is
+# missing from this file, the cross-source validator will report large false
+# mismatches against the unadjusted BhavCopy close on every prior date.
+#
+# Source the full list from: https://www.bseindia.com/corporates/corporate_act.html
+# or NSE -> Equities -> Corporate Filings -> Corporate Actions.
+RELIANCE,2017-09-07,bonus,1,1,,1:1 bonus issue
+INFY,2018-09-04,bonus,1,1,,1:1 bonus issue
+TCS,2018-06-04,bonus,1,1,,1:1 bonus issue
+WIPRO,2019-03-07,bonus,1,3,,1:3 bonus issue
+HDFCBANK,2019-09-19,split,1,2,,Stock split from FV 2 to FV 1
+IRCTC,2021-10-28,split,5,1,,Split from FV 10 to FV 2 (1:5)
+TATAMOTORS,2022-08-29,bonus,2,1,,DVR conversion event

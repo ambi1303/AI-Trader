@@ -1,0 +1,55 @@
+# Current Nifty 50 constituents (NSE symbols, no suffix).
+# Source: NSE quarterly index review. Refresh from
+# https://www.niftyindices.com/indices/equity/broad-based-indices/NIFTY--50
+# This file is the *current* universe. Historical (point-in-time) membership
+# is tracked in the `nifty_constituents` table; see data/seed/historical_constituents.csv.
+ADANIENT
+ADANIPORTS
+APOLLOHOSP
+ASIANPAINT
+AXISBANK
+BAJAJ-AUTO
+BAJFINANCE
+BAJAJFINSV
+BEL
+BHARTIARTL
+CIPLA
+COALINDIA
+DRREDDY
+EICHERMOT
+GRASIM
+HCLTECH
+HDFCBANK
+HDFCLIFE
+HEROMOTOCO
+HINDALCO
+HINDUNILVR
+ICICIBANK
+ITC
+INDUSINDBK
+INFY
+JSWSTEEL
+KOTAKBANK
+LT
+LTIM
+M&M
+MARUTI
+NTPC
+NESTLEIND
+ONGC
+POWERGRID
+RELIANCE
+SBILIFE
+SBIN
+SHRIRAMFIN
+SUNPHARMA
+TCS
+TATACONSUM
+TATAMOTORS
+TATASTEEL
+TECHM
+TITAN
+TRENT
+ULTRACEMCO
+WIPRO
+ZOMATO

@@ -1,0 +1,51 @@
+{# Base layout. Mobile-first: scales gracefully from 320px up to desktop.
+   Uses Tailwind from the official CDN for zero-build setup.
+   When we deploy in Phase C we either keep the CDN (acceptable for a
+   single-user dashboard) or vendor it locally and tighten CSP. #}
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f172a" />
+  <meta name="color-scheme" content="dark light" />
+  <link rel="manifest" href="/manifest.json" />
+  <title>{% block title %}AI Trader{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="h-full bg-slate-950 text-slate-100 antialiased">
+  <div class="min-h-full flex flex-col">
+
+    {% if request.url.path != "/login" %}
+    <header class="sticky top-0 z-10 bg-slate-900/80 backdrop-blur border-b border-slate-800">
+      <nav class="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between gap-3">
+        <a href="/" class="flex items-center gap-2 font-semibold tracking-tight">
+          <span class="inline-block w-2 h-2 rounded-full bg-emerald-400"></span>
+          <span class="text-slate-100">AI Trader</span>
+        </a>
+        <div class="flex items-center gap-1 text-sm">
+          <a href="/" class="px-3 py-1.5 rounded hover:bg-slate-800">Today</a>
+          <a href="/positions" class="px-3 py-1.5 rounded hover:bg-slate-800">Positions</a>
+          <a href="/history" class="px-3 py-1.5 rounded hover:bg-slate-800 hidden sm:inline">History</a>
+          <a href="/report.pdf" class="px-3 py-1.5 rounded hover:bg-slate-800 hidden md:inline">PDF</a>
+          <form method="post" action="/logout" class="inline">
+            <button type="submit"
+                    class="px-3 py-1.5 rounded hover:bg-slate-800 text-slate-400 hover:text-slate-100">
+              Logout
+            </button>
+          </form>
+        </div>
+      </nav>
+    </header>
+    {% endif %}
+
+    <main class="flex-1 w-full max-w-5xl mx-auto px-4 py-6">
+      {% block content %}{% endblock %}
+    </main>
+
+    <footer class="text-xs text-slate-500 text-center py-4 border-t border-slate-900">
+      Read-only dashboard &middot; data source: SQLite
+    </footer>
+  </div>
+</body>
+</html>

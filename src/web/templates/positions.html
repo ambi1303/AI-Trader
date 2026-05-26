@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Positions &middot; AI Trader{% endblock %}
+
+{% block content %}
+<section class="space-y-6">
+
+  <h1 class="text-2xl font-semibold tracking-tight">Positions</h1>
+
+  <section class="bg-slate-900 border border-slate-800 rounded-xl">
+    <header class="px-4 py-3 border-b border-slate-800">
+      <h2 class="font-medium">Open ({{ open_positions|length }})</h2>
+    </header>
+    {% if open_positions %}
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="text-xs uppercase text-slate-400">
+          <tr>
+            <th class="text-left  px-4 py-2">Symbol</th>
+            <th class="text-left  px-4 py-2 hidden sm:table-cell">Sector</th>
+            <th class="text-right px-4 py-2">Qty</th>
+            <th class="text-right px-4 py-2">Entry</th>
+            <th class="text-right px-4 py-2">Last</th>
+            <th class="text-right px-4 py-2 hidden md:table-cell">SL</th>
+            <th class="text-right px-4 py-2 hidden md:table-cell">TP</th>
+            <th class="text-right px-4 py-2">P&amp;L</th>
+            <th class="text-right px-4 py-2">Days</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-800">
+          {% for p in open_positions %}
+          <tr class="hover:bg-slate-800/40">
+            <td class="px-4 py-2 font-medium">{{ p.symbol }}</td>
+            <td class="px-4 py-2 hidden sm:table-cell text-slate-400">{{ p.sector }}</td>
+            <td class="px-4 py-2 text-right tabular-nums">{{ p.qty }}</td>
+            <td class="px-4 py-2 text-right tabular-nums">{{ m.num(p.entry_price) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums">{{ m.num(p.last_close) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums hidden md:table-cell">{{ m.num(p.stop_loss) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums hidden md:table-cell">{{ m.num(p.take_profit) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums">{{ m.money(p.unrealised_pnl) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums">{{ p.holding_days }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="px-4 py-6 text-sm text-slate-400">Nothing open.</div>
+    {% endif %}
+  </section>
+
+  <section class="bg-slate-900 border border-slate-800 rounded-xl">
+    <header class="px-4 py-3 border-b border-slate-800">
+      <h2 class="font-medium">Closed (last 30 days, {{ closed|length }})</h2>
+    </header>
+    {% if closed %}
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="text-xs uppercase text-slate-400">
+          <tr>
+            <th class="text-left  px-4 py-2">Symbol</th>
+            <th class="text-left  px-4 py-2 hidden sm:table-cell">Entry</th>
+            <th class="text-left  px-4 py-2">Exit</th>
+            <th class="text-right px-4 py-2">Qty</th>
+            <th class="text-right px-4 py-2 hidden md:table-cell">Entry &#8377;</th>
+            <th class="text-right px-4 py-2 hidden md:table-cell">Exit &#8377;</th>
+            <th class="text-right px-4 py-2">P&amp;L</th>
+            <th class="text-right px-4 py-2 hidden sm:table-cell">P&amp;L %</th>
+            <th class="text-left  px-4 py-2 hidden md:table-cell">Reason</th>
+            <th class="text-right px-4 py-2">Days</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-800">
+          {% for t in closed %}
+          <tr class="hover:bg-slate-800/40">
+            <td class="px-4 py-2 font-medium">{{ t.symbol }}</td>
+            <td class="px-4 py-2 hidden sm:table-cell tabular-nums text-slate-400">{{ t.entry_date }}</td>
+            <td class="px-4 py-2 tabular-nums">{{ t.exit_date }}</td>
+            <td class="px-4 py-2 text-right tabular-nums">{{ t.qty }}</td>
+            <td class="px-4 py-2 text-right tabular-nums hidden md:table-cell">{{ m.num(t.entry_price) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums hidden md:table-cell">{{ m.num(t.exit_price) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums">{{ m.money(t.net_pnl) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums hidden sm:table-cell">{{ m.pct(t.pnl_pct) }}</td>
+            <td class="px-4 py-2 hidden md:table-cell text-slate-400">{{ t.exit_reason }}</td>
+            <td class="px-4 py-2 text-right tabular-nums">{{ t.holding_days }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="px-4 py-6 text-sm text-slate-400">No trades closed in the last 30 days.</div>
+    {% endif %}
+  </section>
+
+</section>
+{% endblock %}

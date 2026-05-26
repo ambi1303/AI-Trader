@@ -1,0 +1,7 @@
+*AI TRADER -- 2026-05-26*
+2026-05-26: 0 signal(s), top-10 previewed, last-Sharpe=-3.36
+
+_No BUY signals today (thr=0.000)._
+_Last BT:_ Sharpe=-3.36 | MaxDD=-0.5% | n=8
+_Model:_ xgb_v1-20260526T062028Z-5ff57abe
+_Universe:_ 50 | _Validation:_ 20893 event(s)

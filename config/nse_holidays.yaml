@@ -1,0 +1,68 @@
+# NSE trading holidays (Equity segment).
+# Source: NSE annual circular. Update yearly from
+# https://www.nseindia.com/resources/exchange-communication-holidays
+# Special / Muhurat sessions are listed under `special_sessions` with their
+# session times; treated as half-trading days by calendar_check.
+
+holidays:
+  "2023":
+    - {date: "2023-01-26", description: "Republic Day"}
+    - {date: "2023-03-07", description: "Holi"}
+    - {date: "2023-03-30", description: "Ram Navami"}
+    - {date: "2023-04-04", description: "Mahavir Jayanti"}
+    - {date: "2023-04-07", description: "Good Friday"}
+    - {date: "2023-04-14", description: "Dr. Ambedkar Jayanti"}
+    - {date: "2023-05-01", description: "Maharashtra Day"}
+    - {date: "2023-06-28", description: "Bakri Id"}
+    - {date: "2023-08-15", description: "Independence Day"}
+    - {date: "2023-09-19", description: "Ganesh Chaturthi"}
+    - {date: "2023-10-02", description: "Mahatma Gandhi Jayanti"}
+    - {date: "2023-10-24", description: "Dussehra"}
+    - {date: "2023-11-14", description: "Diwali Balipratipada"}
+    - {date: "2023-11-27", description: "Gurunanak Jayanti"}
+    - {date: "2023-12-25", description: "Christmas"}
+  "2024":
+    - {date: "2024-01-22", description: "Special holiday"}
+    - {date: "2024-01-26", description: "Republic Day"}
+    - {date: "2024-03-08", description: "Mahashivratri"}
+    - {date: "2024-03-25", description: "Holi"}
+    - {date: "2024-03-29", description: "Good Friday"}
+    - {date: "2024-04-11", description: "Id-Ul-Fitr"}
+    - {date: "2024-04-17", description: "Ram Navami"}
+    - {date: "2024-05-01", description: "Maharashtra Day"}
+    - {date: "2024-05-20", description: "General Election (Mumbai)"}
+    - {date: "2024-06-17", description: "Bakri Id"}
+    - {date: "2024-07-17", description: "Muharram"}
+    - {date: "2024-08-15", description: "Independence Day"}
+    - {date: "2024-10-02", description: "Mahatma Gandhi Jayanti"}
+    - {date: "2024-11-01", description: "Diwali Laxmi Pujan"}
+    - {date: "2024-11-15", description: "Gurunanak Jayanti"}
+    - {date: "2024-12-25", description: "Christmas"}
+  "2025":
+    - {date: "2025-02-26", description: "Mahashivratri"}
+    - {date: "2025-03-14", description: "Holi"}
+    - {date: "2025-03-31", description: "Id-Ul-Fitr"}
+    - {date: "2025-04-10", description: "Mahavir Jayanti"}
+    - {date: "2025-04-14", description: "Dr. Ambedkar Jayanti"}
+    - {date: "2025-04-18", description: "Good Friday"}
+    - {date: "2025-05-01", description: "Maharashtra Day"}
+    - {date: "2025-08-15", description: "Independence Day"}
+    - {date: "2025-08-27", description: "Ganesh Chaturthi"}
+    - {date: "2025-10-02", description: "Mahatma Gandhi Jayanti / Dussehra"}
+    - {date: "2025-10-21", description: "Diwali Laxmi Pujan"}
+    - {date: "2025-10-22", description: "Diwali Balipratipada"}
+    - {date: "2025-11-05", description: "Gurunanak Jayanti"}
+    - {date: "2025-12-25", description: "Christmas"}
+  "2026":
+    # Placeholder; refresh from NSE 2026 circular when published.
+    - {date: "2026-01-26", description: "Republic Day"}
+    - {date: "2026-05-01", description: "Maharashtra Day"}
+    - {date: "2026-08-15", description: "Independence Day"}
+    - {date: "2026-10-02", description: "Mahatma Gandhi Jayanti"}
+    - {date: "2026-12-25", description: "Christmas"}
+
+special_sessions:
+  "2024":
+    - {date: "2024-11-01", description: "Muhurat trading", open: "18:00", close: "19:00"}
+  "2025":
+    - {date: "2025-10-21", description: "Muhurat trading", open: "18:30", close: "19:30"}

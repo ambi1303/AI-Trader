@@ -1,0 +1,39 @@
+AI TRADER -- DAILY REPORT
+=========================
+Date          : 2026-05-26
+Headline      : 2026-05-26: 0 signal(s) | open=0, unreal=+0 | last-Sharpe=-3.36
+Universe size : 50
+Generated at  : 2026-05-26T09:09:55Z (UTC)
+
+[1] Today's signals
+  (no signals; threshold = 0.500)
+
+[2] Top 10 predictions
+  (no predictions for this date)
+
+[3] Model snapshot
+  run_id          : xgb_v1-20260526T062028Z-5ff57abe
+  trained_window  : 2017-08-16 -> 2024-11-12
+  threshold       : 0.500
+  git_sha         : no-git
+
+[4] Latest backtest
+  name      : stress_oct_2024_correction
+  window    : 2024-10-01 -> 2024-11-29
+  Sharpe    : -3.36
+  MaxDD     : -0.47%
+  TotalRet  : -0.33%
+  Trades    : 8  HitRate=25.0%
+
+[5] Paper portfolio
+  open=0  unrealised=+0  realised_30d=+0  win_rate=0.0%
+    (no open paper positions)
+[6] Recently closed paper trades (last 30 days)
+  (none in window)
+
+[7] Health check
+  20894 event(s) in last 7 days
+    error: 10128
+    warning: 10766
+
+-- Auto-generated. Not investment advice. --

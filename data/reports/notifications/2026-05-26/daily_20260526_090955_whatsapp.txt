@@ -1,0 +1,6 @@
+*AI TRADER -- 2026-05-26*
+2026-05-26: 0 signal(s) | open=0, unreal=+0 | last-Sharpe=-3.36
+
+_No BUY signals today (thr=0.500)._
+_Last BT:_ Sharpe=-3.36 | DD=-0.5%
+_Realised30d:_ +0 | _WinRate:_ 0%

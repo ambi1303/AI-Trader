@@ -1,0 +1,149 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Today &middot; AI Trader{% endblock %}
+
+{% block content %}
+<section class="space-y-6">
+
+  <header class="flex items-end justify-between gap-3 flex-wrap">
+    <div>
+      <div class="text-xs uppercase tracking-wide text-slate-400">As of</div>
+      <h1 class="text-2xl sm:text-3xl font-semibold tracking-tight">{{ snap.as_of }}</h1>
+    </div>
+    {% if snap.freshness and snap.freshness.is_stale %}
+      <div class="text-sm bg-amber-500/10 border border-amber-700 text-amber-200 px-3 py-2 rounded">
+        Data is stale &mdash; latest price bar is {{ snap.freshness.days_since_last_price }} day(s) old
+      </div>
+    {% endif %}
+  </header>
+
+  {# ---- KPI cards ------------------------------------------------------- #}
+  <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs text-slate-400">Open positions</div>
+      <div class="text-2xl font-semibold mt-1">{{ snap.n_open }}</div>
+    </div>
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs text-slate-400">Unrealised P&amp;L</div>
+      <div class="text-2xl font-semibold mt-1">{{ m.money(snap.unrealised_pnl) }}</div>
+    </div>
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs text-slate-400">Realised (30d)</div>
+      <div class="text-2xl font-semibold mt-1">{{ m.money(snap.realised_pnl_30d) }}</div>
+    </div>
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs text-slate-400">Win rate (30d)</div>
+      <div class="text-2xl font-semibold mt-1">{{ "{:.1f}".format(snap.win_rate_30d_pct) }}%</div>
+    </div>
+  </div>
+
+  {# ---- Today's signals ------------------------------------------------- #}
+  <section class="bg-slate-900 border border-slate-800 rounded-xl">
+    <header class="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+      <h2 class="font-medium">Today's signals</h2>
+      <span class="text-xs text-slate-400">{{ snap.signals|length }} total</span>
+    </header>
+    {% if snap.signals %}
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="text-xs uppercase text-slate-400">
+          <tr>
+            <th class="text-left  px-4 py-2">Symbol</th>
+            <th class="text-left  px-4 py-2 hidden sm:table-cell">Sector</th>
+            <th class="text-left  px-4 py-2">Side</th>
+            <th class="text-right px-4 py-2">Qty</th>
+            <th class="text-right px-4 py-2">Entry</th>
+            <th class="text-right px-4 py-2 hidden sm:table-cell">SL</th>
+            <th class="text-right px-4 py-2 hidden sm:table-cell">TP</th>
+            <th class="text-right px-4 py-2">Conf</th>
+            <th class="text-left  px-4 py-2">Status</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-800">
+          {% for s in snap.signals %}
+          <tr class="hover:bg-slate-800/40">
+            <td class="px-4 py-2 font-medium">{{ s.symbol }}</td>
+            <td class="px-4 py-2 hidden sm:table-cell text-slate-400">{{ s.sector or '—' }}</td>
+            <td class="px-4 py-2">{{ m.side_badge(s.side) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums">{{ s.qty }}</td>
+            <td class="px-4 py-2 text-right tabular-nums">{{ m.num(s.entry_price) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums hidden sm:table-cell">{{ m.num(s.stop_loss) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums hidden sm:table-cell">{{ m.num(s.take_profit) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums">{{ "{:.2f}".format(s.confidence) }}</td>
+            <td class="px-4 py-2">{{ m.status_badge(s.status) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="px-4 py-6 text-sm text-slate-400">No signals generated for {{ snap.as_of }}.</div>
+    {% endif %}
+  </section>
+
+  {# ---- Open positions -------------------------------------------------- #}
+  <section class="bg-slate-900 border border-slate-800 rounded-xl">
+    <header class="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+      <h2 class="font-medium">Open positions</h2>
+      <a href="/positions" class="text-xs text-emerald-400 hover:text-emerald-300">View all &rarr;</a>
+    </header>
+    {% if snap.open_positions %}
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="text-xs uppercase text-slate-400">
+          <tr>
+            <th class="text-left  px-4 py-2">Symbol</th>
+            <th class="text-right px-4 py-2">Qty</th>
+            <th class="text-right px-4 py-2">Entry</th>
+            <th class="text-right px-4 py-2">Last</th>
+            <th class="text-right px-4 py-2">P&amp;L</th>
+            <th class="text-right px-4 py-2 hidden sm:table-cell">P&amp;L %</th>
+            <th class="text-right px-4 py-2 hidden md:table-cell">Days</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-800">
+          {% for p in snap.open_positions %}
+          <tr class="hover:bg-slate-800/40">
+            <td class="px-4 py-2 font-medium">{{ p.symbol }}</td>
+            <td class="px-4 py-2 text-right tabular-nums">{{ p.qty }}</td>
+            <td class="px-4 py-2 text-right tabular-nums">{{ m.num(p.entry_price) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums">{{ m.num(p.last_close) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums">{{ m.money(p.unrealised_pnl) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums hidden sm:table-cell">{{ m.pct(p.unrealised_pnl_pct) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums hidden md:table-cell">{{ p.holding_days }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="px-4 py-6 text-sm text-slate-400">No open paper positions.</div>
+    {% endif %}
+  </section>
+
+  {# ---- Footer info ----------------------------------------------------- #}
+  <section class="grid sm:grid-cols-2 gap-3 text-sm">
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs uppercase tracking-wide text-slate-400 mb-2">Data freshness</div>
+      <div class="space-y-1">
+        <div>Latest price bar: <span class="tabular-nums">{{ snap.freshness.latest_price_date or '—' }}</span></div>
+        <div>Latest features:  <span class="tabular-nums">{{ snap.freshness.latest_feature_date or '—' }}</span></div>
+        <div>Latest predict:   <span class="tabular-nums">{{ snap.freshness.latest_prediction_date or '—' }}</span></div>
+      </div>
+    </div>
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs uppercase tracking-wide text-slate-400 mb-2">Active model</div>
+      {% if snap.model %}
+        <div>Run: <span class="font-mono text-xs">{{ snap.model.run_id }}</span></div>
+        <div>Name: {{ snap.model.model_name }}</div>
+        <div>Threshold: {{ "{:.3f}".format(snap.model.threshold) if snap.model.threshold is not none else '—' }}</div>
+        <div>Trained: {{ snap.model.trained_from }} &rarr; {{ snap.model.trained_to }}</div>
+      {% else %}
+        <div class="text-slate-400">No model registered yet.</div>
+      {% endif %}
+      <div class="mt-2 text-xs text-slate-500">Universe: {{ snap.universe_size }} symbols</div>
+    </div>
+  </section>
+
+</section>
+{% endblock %}

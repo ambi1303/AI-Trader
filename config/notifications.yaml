@@ -1,0 +1,35 @@
+# Notification configuration. NO SECRETS HERE -- creds live in .env only.
+# This file controls *what* gets sent and *which channels* are enabled.
+
+enabled_channels:
+  email: true
+  whatsapp: true
+
+# Whatsapp provider: "callmebot" (free, personal) or "twilio" (paid, multi-recipient).
+whatsapp_provider: callmebot
+
+email:
+  subject_prefix: "[AI Trader]"
+  attach_pdf: true        # attach a one-page PDF summary alongside HTML body
+  attach_csv: false       # attach today's predictions as CSV (off by default)
+  bcc_self: true          # BCC the from-address so the sender keeps a copy
+
+whatsapp:
+  # WhatsApp messages are limited to ~1024 chars on most providers; we fit
+  # within ~700 to leave room for emojis and line breaks.
+  max_chars: 700
+
+content:
+  # Daily report sections to include. Toggle per section so a slim build can
+  # turn off heavy parts.
+  show_top_predictions: true
+  top_predictions_n: 10
+  show_signals: true
+  show_latest_model: true
+  show_latest_backtest: true
+  show_validation_summary: true
+  show_recent_trades: true
+  recent_trades_n: 10
+
+# Defaults used in dry-run mode (no creds required).
+dry_run_output_dir: data/reports/notifications
