@@ -83,6 +83,13 @@ class ModelMetadata:
     metrics: dict = field(default_factory=dict)
     threshold: float | None = None
     target_return_threshold: float = 0.005
+    # Inference contract. `horizon` is the forward-return horizon the model
+    # was trained on (1 = next-day, 20 ~ one month). `cross_sectional_features`
+    # tells the predictor it must compute per-day universe ranks before
+    # scoring (otherwise the xs_* columns the model expects won't exist).
+    # Defaults keep older metadata.json files loadable.
+    horizon: int = 1
+    cross_sectional_features: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -103,6 +110,8 @@ def save_model(
     metrics: dict,
     threshold: float | None,
     target_return_threshold: float = 0.005,
+    horizon: int = 1,
+    cross_sectional_features: bool = False,
     base_dir: str | Path = "data/models",
 ) -> ModelMetadata:
     base_path = Path(base_dir).resolve()
@@ -124,6 +133,8 @@ def save_model(
         metrics=metrics,
         threshold=threshold,
         target_return_threshold=target_return_threshold,
+        horizon=horizon,
+        cross_sectional_features=cross_sectional_features,
     )
 
     joblib.dump(cxgb, run_dir / "model.joblib", compress=3)

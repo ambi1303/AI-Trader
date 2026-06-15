@@ -8,7 +8,14 @@
   <header class="flex items-end justify-between gap-3 flex-wrap">
     <div>
       <div class="text-xs uppercase tracking-wide text-slate-400">As of</div>
-      <h1 class="text-2xl sm:text-3xl font-semibold tracking-tight">{{ snap.as_of }}</h1>
+      <h1 class="text-2xl sm:text-3xl font-semibold tracking-tight">
+        {{ snap.as_of }}
+        {% if snap.freshness and snap.freshness.days_since_last_price and snap.freshness.days_since_last_price > 0 %}
+          <span class="ml-2 align-middle text-xs font-medium bg-amber-500/15 border border-amber-700 text-amber-200 px-2 py-0.5 rounded">
+            {{ snap.freshness.days_since_last_price }} day(s) behind today
+          </span>
+        {% endif %}
+      </h1>
     </div>
     {% if snap.freshness and snap.freshness.is_stale %}
       <div class="text-sm bg-amber-500/10 border border-amber-700 text-amber-200 px-3 py-2 rounded">
@@ -77,7 +84,85 @@
       </table>
     </div>
     {% else %}
-    <div class="px-4 py-6 text-sm text-slate-400">No signals generated for {{ snap.as_of }}.</div>
+    <div class="px-4 py-6 text-sm text-slate-400">
+      No signal crossed the action threshold
+      {% if snap.threshold is not none %}(<span class="tabular-nums">{{ "{:.3f}".format(snap.threshold) }}</span>){% endif %}
+      for {{ snap.as_of }}. The model isn&rsquo;t confident enough today &mdash;
+      see the watchlist below for the closest candidates.
+    </div>
+    {% endif %}
+  </section>
+
+  {# ---- Watchlist / top candidates ------------------------------------- #}
+  <section class="bg-slate-900 border border-slate-800 rounded-xl">
+    <header class="px-4 py-3 border-b border-slate-800 flex items-center justify-between gap-2 flex-wrap">
+      <div>
+        <h2 class="font-medium">Watchlist &middot; top candidates</h2>
+        <p class="text-xs text-slate-500 mt-0.5">
+          Every scored symbol ranked by model conviction (calibrated probability).
+          Bars fill toward the action threshold
+          {% if snap.threshold is not none %}<span class="tabular-nums text-slate-300">{{ "{:.3f}".format(snap.threshold) }}</span>{% endif %}.
+        </p>
+      </div>
+      <span class="text-xs text-slate-400">{{ snap.candidates|length }} shown</span>
+    </header>
+    {% if snap.candidates %}
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="text-xs uppercase text-slate-400">
+          <tr>
+            <th class="text-left  px-4 py-2 w-8">#</th>
+            <th class="text-left  px-4 py-2">Symbol</th>
+            <th class="text-left  px-4 py-2 hidden sm:table-cell">Sector</th>
+            <th class="text-left  px-4 py-2 w-1/3">Conviction</th>
+            <th class="text-right px-4 py-2 hidden sm:table-cell">Raw</th>
+            <th class="text-right px-4 py-2">Calibrated</th>
+            <th class="text-right px-4 py-2">vs Thr.</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-800">
+          {% for c in snap.candidates %}
+          {# Scale bars to a fixed 0.60 ceiling so isotonic-compressed probs stay visible. #}
+          {% set bar_pct = (c.calibrated_prob / 0.60 * 100) %}
+          {% set bar_pct = 100 if bar_pct > 100 else (0 if bar_pct < 0 else bar_pct) %}
+          {% set thr_pct = ((c.threshold or 0) / 0.60 * 100) %}
+          <tr class="hover:bg-slate-800/40 {{ 'bg-emerald-500/5' if c.would_fire else '' }}">
+            <td class="px-4 py-2 text-slate-500 tabular-nums">{{ loop.index }}</td>
+            <td class="px-4 py-2 font-medium">
+              {{ c.symbol }}
+              {% if c.would_fire %}
+                <span class="ml-1 align-middle text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-700 px-1.5 py-0.5 rounded">FIRES</span>
+              {% endif %}
+            </td>
+            <td class="px-4 py-2 hidden sm:table-cell text-slate-400">{{ c.sector or '—' }}</td>
+            <td class="px-4 py-2">
+              <div class="relative h-2.5 w-full bg-slate-800 rounded">
+                <div class="absolute inset-y-0 left-0 rounded {{ 'bg-emerald-500' if c.would_fire else 'bg-sky-500/70' }}"
+                     style="width: {{ "{:.1f}".format(bar_pct) }}%"></div>
+                {% if c.threshold is not none %}
+                <div class="absolute inset-y-[-2px] w-px bg-amber-400"
+                     style="left: {{ "{:.1f}".format(thr_pct) }}%" title="threshold"></div>
+                {% endif %}
+              </div>
+            </td>
+            <td class="px-4 py-2 text-right tabular-nums hidden sm:table-cell text-slate-400">{{ "{:.3f}".format(c.raw_prob) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums font-medium">{{ "{:.3f}".format(c.calibrated_prob) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums">
+              {% if c.distance_to_threshold is none %}
+                <span class="text-slate-500">—</span>
+              {% elif c.distance_to_threshold >= 0 %}
+                <span class="text-emerald-400">+{{ "{:.3f}".format(c.distance_to_threshold) }}</span>
+              {% else %}
+                <span class="text-rose-400">{{ "{:.3f}".format(c.distance_to_threshold) }}</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="px-4 py-6 text-sm text-slate-400">No predictions scored yet.</div>
     {% endif %}
   </section>
 

@@ -1,0 +1,84 @@
+# Build context hygiene. Anything listed here NEVER ends up in the
+# Docker image, even if a misbehaving COPY tries to grab it.
+#
+# Two reasons we're aggressive:
+# 1. Secrets: .env, *.pem, broker creds, etc. -- absolutely must not
+#    leak into a layer (image layers are world-readable to anyone with
+#    pull access).
+# 2. Size: SQLite DBs, model artefacts, and the venv balloon the build
+#    context to ~1 GB if we let them in. That's 10x slower to send to
+#    the daemon for every build.
+
+# --- Secrets ---------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+
+# --- VCS ------------------------------------------------------------------
+.git
+.gitignore
+.gitattributes
+.github/
+
+# --- Python tooling -------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# --- Virtual envs (we reinstall inside the image) ------------------------
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# --- Runtime data (volume-mounted, NOT baked in) -------------------------
+data/
+logs/
+reports/
+models/
+*.db
+*.db-shm
+*.db-wal
+*.joblib
+*.pkl
+*.pt
+*.pth
+*.h5
+artifacts/
+
+# --- IDE / OS cruft ------------------------------------------------------
+.vscode/
+.idea/
+.cursor/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Docs that don't belong in the image --------------------------------
+*.md
+!README.md
+docs/
+
+# --- Tests (we run them in CI, not in the prod image) -------------------
+tests/

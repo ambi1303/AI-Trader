@@ -40,7 +40,24 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--symbols", default=None,
                    help="Comma-separated symbols. Default: all in feature_data.")
     p.add_argument("--target", type=float, default=0.005,
-                   help="Next-day return threshold for positive label (default 0.005 = 0.5%%).")
+                   help="Return threshold for positive label when "
+                        "--label-mode=absolute (default 0.005 = 0.5%%).")
+    p.add_argument("--horizon", type=int, default=20,
+                   help="Forward-return horizon in trading days. Default 20 "
+                        "(~1 month): the validated edge lives at the monthly "
+                        "horizon, not next-day. Use 1 for the legacy "
+                        "next-day model.")
+    p.add_argument("--label-mode", choices=["absolute", "cross_sectional"],
+                   default="absolute",
+                   help="absolute = up > target over horizon; cross_sectional "
+                        "= beats peers that day (top 1-quantile).")
+    p.add_argument("--label-quantile", type=float, default=0.50,
+                   help="Cross-sectional cutoff when --label-mode="
+                        "cross_sectional (0.70 = top 30%%).")
+    p.add_argument("--cross-sectional-features",
+                   action=argparse.BooleanOptionalAction, default=True,
+                   help="Add per-day universe rank features (xs_*). On by "
+                        "default; --no-cross-sectional-features to disable.")
     p.add_argument("--model-name", default="xgb_v1",
                    help="Logical model name (used in registry + filenames).")
     return p.parse_args(argv)
@@ -65,8 +82,20 @@ def main(argv: list[str] | None = None) -> int:
         else None
     )
 
-    log.info("Building training matrix (target threshold = {:.3%})", args.target)
-    matrix = build_training_matrix(symbols, target_return_threshold=args.target)
+    log.info(
+        "Building training matrix | label_mode={} horizon={} xsec={} "
+        "(target={:.3%}, quantile={})",
+        args.label_mode, args.horizon, args.cross_sectional_features,
+        args.target, args.label_quantile,
+    )
+    matrix = build_training_matrix(
+        symbols,
+        target_return_threshold=args.target,
+        label_mode=args.label_mode,
+        label_quantile=args.label_quantile,
+        horizon=args.horizon,
+        cross_sectional_features=args.cross_sectional_features,
+    )
     if matrix.X.empty:
         log.error("Empty training matrix. Run scripts.build_features first.")
         return 1
@@ -96,7 +125,14 @@ def main(argv: list[str] | None = None) -> int:
     log.info("Tuning decision threshold on calibration slice...")
     cost_model = _load_cost_model()
     val_cal_probs = cxgb.predict_calibrated(X_val)
-    thr = tune_threshold(val_cal_probs, fwd_val, cost_model=cost_model)
+    # adaptive=True: search the *observed* calibrated-score distribution rather
+    # than a fixed 0.50 floor. Isotonic calibration compresses probabilities
+    # toward the base rate (~0.35 here, max ~0.45), so a 0.50 floor would only
+    # fire on rare historical outliers and the live universe would produce
+    # ~zero signals/day. The expected-utility + min_signals guards still keep
+    # the chosen operating point honest.
+    thr = tune_threshold(val_cal_probs, fwd_val, cost_model=cost_model,
+                         adaptive=True)
     log.info(
         "Chosen threshold = {:.2f} | n_signals(val)={} | expected_per_trade={:.4%} | "
         "round-trip cost = {:.4%}",
@@ -123,6 +159,14 @@ def main(argv: list[str] | None = None) -> int:
         },
         "split_sizes": {"train": int(len(X_tr)), "val": int(len(X_val)),
                         "test": int(len(X_te))},
+        "config": {
+            "label_mode": args.label_mode,
+            "label_quantile": args.label_quantile,
+            "horizon": args.horizon,
+            "cross_sectional_features": args.cross_sectional_features,
+            "n_features": int(matrix.X.shape[1]),
+            "n_symbols": int(matrix.meta["symbol"].nunique()),
+        },
     }
 
     train_lo, train_hi = boundary_dates(matrix.meta, train_idx)
@@ -135,6 +179,8 @@ def main(argv: list[str] | None = None) -> int:
         metrics=metrics,
         threshold=thr.threshold,
         target_return_threshold=args.target,
+        horizon=args.horizon,
+        cross_sectional_features=args.cross_sectional_features,
     )
     log.success("Model saved | run_id={} | path={}", meta.run_id,
                 Path("data/models") / meta.run_id)

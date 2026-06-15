@@ -33,13 +33,9 @@ ENV/
 *.pfx
 secrets/
 
-# Data and DB (do not sync these to OneDrive either)
-data/raw/
-data/processed/
-data/*.db
-data/*.db-shm
-data/*.db-wal
-data/cache/
+# Data and DB (runtime state — lives on persistent disk in production)
+data/
+!data/.gitkeep
 
 # Logs
 logs/

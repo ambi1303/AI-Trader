@@ -54,7 +54,7 @@ log = get_logger("web.app")
 _HERE = Path(__file__).resolve().parent
 _TEMPLATES_DIR = _HERE / "templates"
 _STATIC_DIR = _HERE / "static"
-_REPORTS_DIR = Path("reports")        # produced by the daily pipeline
+_REPORTS_DIR = Path("data/reports/notifications")  # produced by the daily pipeline
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +314,6 @@ def create_app() -> FastAPI:
 def _latest_pdf(directory: Path) -> Path | None:
     if not directory.exists():
         return None
-    pdfs: Iterable[Path] = directory.glob("*.pdf")
+    pdfs: Iterable[Path] = directory.rglob("*.pdf")
     candidates = sorted(pdfs, key=lambda p: p.stat().st_mtime, reverse=True)
     return candidates[0] if candidates else None

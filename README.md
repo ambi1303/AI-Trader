@@ -391,13 +391,164 @@ adapter, e.g. `http://192.168.1.42:8000`.
   the ingest / model / signal modules, so a bug in the dashboard
   cannot corrupt your trading data.
 
-### Phase B / C / D (next)
+---
 
-| Phase | What                                                                  |
-| ----- | --------------------------------------------------------------------- |
-| B     | Dockerfile + docker-compose so it spins up with one command           |
-| C     | Provision Oracle Cloud Free ARM VM, deploy via Cloudflare Tunnel      |
-| D     | Plumb in Angel One SmartAPI for live data (the package is built)      |
+## Phase B: containerised (one-command spin-up)
+
+The whole stack runs in two Docker containers backed by a shared volume:
+
+| Service     | What it does                                                  |
+| ----------- | ------------------------------------------------------------- |
+| `web`       | Read-only FastAPI dashboard on `127.0.0.1:8000`               |
+| `scheduler` | Runs `scripts.run_daily` every weekday at 18:00 IST           |
+
+The image is multi-arch — same `Dockerfile` builds on `linux/amd64`
+(your laptop, most VPS) **and** `linux/arm64` (Oracle Cloud Free ARM
+Ampere). That's the whole reason Phase B exists: lock the code,
+deps, and entry-points so Phase C is a `docker compose up` away.
+
+### Prerequisites
+
+* **Docker Desktop ≥ 4.20** on Windows or macOS, or `docker` + the
+  `compose` plugin on Linux (`apt install docker-compose-plugin`).
+* The same `.env` you used in Phase A. The compose file `env_file`s
+  it directly; we don't bake secrets into the image.
+
+### One-command spin-up
+
+```bash
+# from inside ai_trading_system/
+docker compose up --build -d
+
+# tail logs (Ctrl-C to detach; containers keep running)
+docker compose logs -f web
+docker compose logs -f scheduler
+
+# inspect running services
+docker compose ps
+
+# graceful stop (give the scheduler 10 min to finish a run if any)
+docker compose down --timeout 600
+```
+
+The web dashboard is at `http://localhost:8000` exactly as in Phase A —
+the bind is host-loopback only (`127.0.0.1:8000:8000`) so nothing on
+your LAN can hit it directly. Phase C will replace this with a
+Cloudflare Tunnel that connects to the same `127.0.0.1:8000` from
+inside the host.
+
+### First-run: populate the DB without waiting until 18:00
+
+A fresh Docker volume has an empty `data/trading.db`. Either wait for
+the next 18:00 IST tick, or kick off one run inline:
+
+```bash
+# Option 1: temporarily set --run-now in the scheduler env, then
+# bring just the scheduler back up:
+docker compose run --rm scheduler \
+  python -m scripts.run_daily --skip-notify
+
+# Option 2: shell into a one-off container with the same image
+docker compose run --rm --entrypoint sh web -c \
+  "python -m scripts.run_daily --skip-notify --threshold 0.30"
+```
+
+Both write to the persisted volume; the dashboard picks them up
+immediately (SQLite WAL allows concurrent readers + one writer).
+
+### Architecture notes
+
+```
+┌────────────────────── docker network: ai-trader_default ───────────────────────┐
+│                                                                                │
+│  ┌──────────────────────────┐         ┌──────────────────────────────────┐     │
+│  │ web (uvicorn :8000)      │         │ scheduler (run_scheduler loop)   │     │
+│  │ - read-only filesystem   │         │ - read-only filesystem           │     │
+│  │ - non-root UID 10001     │         │ - non-root UID 10001             │     │
+│  │ - cap_drop: ALL          │         │ - cap_drop: ALL                  │     │
+│  │ - no-new-privileges      │         │ - no-new-privileges              │     │
+│  └──────────┬───────────────┘         └──────────┬───────────────────────┘     │
+│             │ reads                              │ writes                      │
+│             ▼                                    ▼                              │
+│       ┌──────────────────────────────────────────────────────┐                  │
+│       │ named volume: ai-trader-data                         │                  │
+│       │   /app/data/trading.db (+ WAL/SHM)                   │                  │
+│       │ bind mount: ./logs        (host-readable)            │                  │
+│       │ bind mount: ./reports     (host-readable PDFs)       │                  │
+│       │ bind mount: ./data/models (host-readable artefacts)  │                  │
+│       └──────────────────────────────────────────────────────┘                  │
+└────────────────────────────────────────────────────────────────────────────────┘
+                              │  bound only to 127.0.0.1
+                              ▼
+                       Browser on the host
+```
+
+* **Filesystem is read-only** in both containers — only the volume
+  mounts are writable. A pip-injected attack can't write a webshell.
+* **Non-root** UID 10001. Even if the app were RCE-ed, the attacker
+  has no `sudo` and no shell (`/usr/sbin/nologin`).
+* **Capabilities dropped** — no `CAP_NET_RAW`, no `CAP_SYS_ADMIN`,
+  nothing. The container can `connect()` outbound and that's it.
+* **`no-new-privileges`** — setuid binaries inside (none today, but
+  defence-in-depth) cannot escalate.
+* **Resource limits** — web is capped at 1 CPU / 512 MB; scheduler at
+  2 CPU / 2 GB. Prevents a runaway xgboost predict from OOM-killing
+  the whole host.
+
+### Tweaking the schedule without rebuilding
+
+Add to `.env`:
+
+```ini
+# default 18:00; pick your own
+SCHED_HOUR=18
+SCHED_MINUTE=0
+SCHED_WEEKDAYS_ONLY=true     # set false to run Sat+Sun too
+SCHED_PIPELINE_TIMEOUT=900   # hard kill after 15 min
+TZ=Asia/Kolkata              # any IANA name
+```
+
+Then `docker compose restart scheduler` to pick them up.
+
+### Forwarding extra args to `run_daily`
+
+The scheduler runs `run_daily` with no flags by default. Override the
+`command:` in `docker-compose.yml` (or use `docker compose run`) and
+pass anything after `--`:
+
+```bash
+# example: run with the lower threshold while we work on calibration
+docker compose run --rm scheduler \
+  python -m scripts.run_scheduler --run-now -- --skip-notify --threshold 0.30
+```
+
+### Image hygiene
+
+* `.dockerignore` aggressively excludes `.env`, `data/`, `*.pkl`,
+  the venv, the `.git/` directory, and the test suite from the build
+  context. Layers stay slim and secrets never enter the registry.
+* The Dockerfile is a multi-stage build: build deps (`build-essential`,
+  `gcc`, `libffi-dev`) live only in the builder stage; the final
+  image is `python:3.11-slim-bookworm` + `tini` + `tzdata` + the venv.
+  Compressed image size is ~450 MB on amd64 (vs. ~1.2 GB if we
+  bundled build tools).
+* The image runs `tini` as PID 1 so `docker stop` / Ctrl-C deliver a
+  proper SIGTERM and the scheduler exits cleanly between runs.
+
+### What changes in Phase C
+
+Almost nothing in the application code. We add:
+* an `oracle-cloud/` deploy script,
+* a `cloudflared` companion service in `docker-compose.yml`,
+* DNS for the public subdomain.
+
+The `web` and `scheduler` services come along unchanged.
+
+### Phase D (later)
+
+Plumb in Angel One SmartAPI for live data. The package is already
+built (`src/data_ingestion/angelone/`); we just need the deployed
+secrets and the `--use-angelone` flag wired into the cron pass-through.
 
 ---
 

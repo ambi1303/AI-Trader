@@ -77,6 +77,25 @@ class ClosedTradeRow:
 
 
 @dataclass(frozen=True)
+class CandidateRow:
+    """A ranked model prediction for the latest scored date.
+
+    Distinct from a SignalRow: a candidate is *every* symbol the model
+    scored, ranked by conviction, whether or not it crossed the action
+    threshold. This powers the watchlist so the dashboard is useful for
+    analysis even on days when nothing fires.
+    """
+    symbol: str
+    prediction_date: str
+    raw_prob: float
+    calibrated_prob: float
+    sector: str | None
+    threshold: float | None
+    distance_to_threshold: float | None   # calibrated - threshold (neg = below)
+    would_fire: bool
+
+
+@dataclass(frozen=True)
 class FreshnessRow:
     latest_price_date: str | None
     latest_feature_date: str | None
@@ -109,6 +128,8 @@ class DashboardSnapshot:
     freshness: FreshnessRow | None = None
     model: ModelRow | None = None
     universe_size: int = 0
+    candidates: list[CandidateRow] = field(default_factory=list)
+    threshold: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out = asdict(self)
@@ -169,10 +190,23 @@ def _coerce_threshold(raw: Any) -> float | None:
 # ---------------------------------------------------------------------------
 
 
+def get_latest_signal_date() -> str | None:
+    """Return the most recent ``signal_date`` present in ``signal_outbox``,
+    or ``None`` if the table is empty. We use this so the dashboard can
+    show "the latest available run" rather than going dark on weekends,
+    holidays, and 4-day-old features."""
+    row = _safe_fetch_one(
+        "SELECT MAX(signal_date) AS d FROM signal_outbox"
+    )
+    return (row or {}).get("d")
+
+
 def get_today_signals(as_of: str | None = None) -> list[SignalRow]:
+    """Signals for ``as_of`` (defaults to today). If today has no signals
+    we fall back to the latest signal date we have, so the user sees
+    *something* even if features/predictions are stale."""
     sd = as_of or date.today().isoformat()
-    rows = _safe_fetch(
-        """
+    sql = """
         SELECT s.symbol, s.signal_date, s.side, s.entry_price, s.stop_loss,
                s.take_profit, s.qty, s.confidence, s.status,
                ss.sector AS sector
@@ -180,9 +214,14 @@ def get_today_signals(as_of: str | None = None) -> list[SignalRow]:
         LEFT   JOIN stock_sectors ss ON ss.symbol = s.symbol
         WHERE  s.signal_date = ?
         ORDER  BY s.confidence DESC
-        """,
-        (sd,),
-    )
+    """
+    rows = _safe_fetch(sql, (sd,))
+    if not rows and as_of is None:
+        # Caller didn't pin a date and today is dry -- fall back so the
+        # dashboard isn't blank when the latest run is from Friday.
+        latest = get_latest_signal_date()
+        if latest and latest != sd:
+            rows = _safe_fetch(sql, (latest,))
     return [SignalRow(
         symbol=r["symbol"],
         signal_date=r["signal_date"],
@@ -195,6 +234,70 @@ def get_today_signals(as_of: str | None = None) -> list[SignalRow]:
         status=r["status"],
         sector=r["sector"],
     ) for r in rows]
+
+
+def get_latest_prediction_date() -> str | None:
+    """Most recent ``prediction_date`` present in ``predictions_log``."""
+    row = _safe_fetch_one(
+        "SELECT MAX(prediction_date) AS d FROM predictions_log"
+    )
+    return (row or {}).get("d")
+
+
+def get_top_candidates(
+    limit: int = 15,
+    as_of: str | None = None,
+    threshold: float | None = None,
+) -> list[CandidateRow]:
+    """Ranked model predictions for the latest scored date.
+
+    Always returns the model's most confident names (by calibrated
+    probability) regardless of whether they crossed the action threshold,
+    so the dashboard can show a watchlist on days when no signal fires.
+
+    We pin to the *most recently inserted* run for that date so re-running
+    predict_today (e.g. after a retrain) doesn't mix stale rows from older
+    model runs into the ranking.
+    """
+    pred_date = as_of or get_latest_prediction_date()
+    if not pred_date:
+        return []
+    if threshold is None:
+        model = get_latest_model()
+        threshold = model.threshold if model else None
+
+    rows = _safe_fetch(
+        """
+        SELECT p.symbol, p.prediction_date, p.raw_prob, p.calibrated_prob,
+               ss.sector AS sector
+        FROM   predictions_log p
+        LEFT   JOIN stock_sectors ss ON ss.symbol = p.symbol
+        WHERE  p.prediction_date = ?
+          AND  p.run_id = (
+                 SELECT run_id FROM predictions_log
+                 WHERE  prediction_date = ?
+                 ORDER  BY id DESC LIMIT 1
+               )
+        ORDER  BY p.calibrated_prob DESC, p.raw_prob DESC
+        LIMIT  ?
+        """,
+        (pred_date, pred_date, int(limit)),
+    )
+    out: list[CandidateRow] = []
+    for r in rows:
+        cal = float(r["calibrated_prob"] or 0.0)
+        dist = (cal - threshold) if threshold is not None else None
+        out.append(CandidateRow(
+            symbol=r["symbol"],
+            prediction_date=r["prediction_date"],
+            raw_prob=float(r["raw_prob"] or 0.0),
+            calibrated_prob=cal,
+            sector=r["sector"],
+            threshold=threshold,
+            distance_to_threshold=dist,
+            would_fire=(threshold is not None and cal >= threshold),
+        ))
+    return out
 
 
 def get_open_positions(as_of: str | None = None) -> list[OpenPositionRow]:
@@ -331,8 +434,18 @@ def get_universe_size() -> int:
 
 def build_dashboard_snapshot(as_of: str | None = None) -> DashboardSnapshot:
     """One round-trip helper for the home page; aggregates the sections
-    above plus a few rolled-up portfolio numbers."""
+    above plus a few rolled-up portfolio numbers.
+
+    The displayed ``as_of`` becomes the *effective* signal date -- if
+    today has no signals we surface the latest one we have instead, so
+    the page never silently lies about freshness.
+    """
     today = as_of or date.today().isoformat()
+    signals = get_today_signals(today)
+    # If we fell back, use that date as the headline "as of"; otherwise
+    # keep today's date so the user sees a fresh run.
+    effective_as_of = signals[0].signal_date if signals else today
+
     open_pos = get_open_positions(today)
     closed = get_recent_closed(window_days=30, limit=50)
     realised = sum(t.net_pnl for t in closed)
@@ -341,9 +454,12 @@ def build_dashboard_snapshot(as_of: str | None = None) -> DashboardSnapshot:
         win_rate = (sum(1 for t in closed if t.net_pnl > 0) / len(closed)) * 100.0
     else:
         win_rate = 0.0
+    model = get_latest_model()
+    threshold = model.threshold if model else None
+    candidates = get_top_candidates(limit=15, threshold=threshold)
     return DashboardSnapshot(
-        as_of=today,
-        signals=get_today_signals(today),
+        as_of=effective_as_of,
+        signals=signals,
         open_positions=open_pos,
         closed_recent=closed,
         realised_pnl_30d=realised,
@@ -351,8 +467,10 @@ def build_dashboard_snapshot(as_of: str | None = None) -> DashboardSnapshot:
         win_rate_30d_pct=win_rate,
         n_open=len(open_pos),
         freshness=get_freshness(today),
-        model=get_latest_model(),
+        model=model,
         universe_size=get_universe_size(),
+        candidates=candidates,
+        threshold=threshold,
     )
 
 

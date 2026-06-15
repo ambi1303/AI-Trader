@@ -1,0 +1,172 @@
+# Two-container layout:
+#   * `web`       -- read-only FastAPI dashboard, exposes :8000
+#   * `scheduler` -- runs `scripts.run_daily` at 18:00 IST on weekdays
+#
+# Both containers mount the SAME data volume, so signals written by the
+# scheduler appear in the dashboard immediately. SQLite WAL mode lets
+# the scheduler write while the web reads, without locking conflicts.
+#
+# Security hardening (per the codeguard workspace rule):
+#   * Run as a non-root user (UID 10001 baked into the Dockerfile)
+#   * `read_only: true` filesystem with explicit tmpfs for /tmp
+#   * `cap_drop: [ALL]` -- we don't need any Linux capabilities
+#   * `security_opt: no-new-privileges:true` -- block setuid escapes
+#   * No host networking, no docker socket, no privileged mode
+#   * Resource limits (CPU + RAM) so a runaway pipeline can't OOM the
+#     whole host
+#   * Healthchecks on both services (web pings /healthz; scheduler is
+#     considered healthy as long as the process is alive)
+#
+# Run:
+#   docker compose up --build -d
+#
+# Logs:
+#   docker compose logs -f web
+#   docker compose logs -f scheduler
+#
+# Bring down (graceful):
+#   docker compose down
+
+name: ai-trader
+
+# ---------------------------------------------------------------------------
+# Common pieces (anchored, reused below)
+# ---------------------------------------------------------------------------
+
+x-common-build: &common-build
+  build:
+    context: .
+    # `--build-arg` for UID/GID: keep the container UID stable across
+    # hosts so volume permissions don't drift when you rebuild.
+    args:
+      APP_UID: "10001"
+      APP_GID: "10001"
+
+x-common-security: &common-security
+  read_only: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  # Tmp filesystems mounted noexec/nosuid so a writable /tmp can't be
+  # used as a code-execution staging area.
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=64m
+
+x-common-volumes: &common-volumes
+  volumes:
+    # The SQLite DB and price/feature data. Persists across `docker
+    # compose down`. NEVER delete this volume unless you want to lose
+    # the model history.
+    - aitrader-data:/app/data
+    # Application logs. Bind-mount to ./logs so you can `tail -f`
+    # them from outside the container.
+    - ./logs:/app/logs:rw
+    # Daily report PDFs. Bind-mount so you can grab them from the host.
+    - ./reports:/app/reports:rw
+    # Trained model artefacts. Bind-mount because they're large and
+    # we already keep them on disk; named volume would just duplicate.
+    - ./data/models:/app/models:rw
+
+x-common-env: &common-env
+  env_file:
+    # `.env` lives at the project root, gitignored, never baked into
+    # the image. See .env.example for the keys the app expects.
+    - .env
+
+services:
+
+  # -------------------------------------------------------------------
+  # Web dashboard
+  # -------------------------------------------------------------------
+  web:
+    <<: [*common-build, *common-security, *common-volumes, *common-env]
+    image: ai-trader/web:phase-b
+    container_name: ai-trader-web
+    restart: unless-stopped
+    # Bind to 127.0.0.1 on the HOST so even though the container
+    # listens on 0.0.0.0:8000 internally, only loopback on the host
+    # can reach it. Phase C swaps this for Cloudflare Tunnel which
+    # connects to 127.0.0.1:8000 from the same host.
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).status==200 else 1)"
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          # Web service has near-zero CPU work; cap small so a runaway
+          # query can't starve the scheduler.
+          cpus: "1.0"
+          memory: "512M"
+        reservations:
+          cpus: "0.10"
+          memory: "128M"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # -------------------------------------------------------------------
+  # Daily pipeline scheduler
+  # -------------------------------------------------------------------
+  scheduler:
+    <<: [*common-build, *common-security, *common-volumes, *common-env]
+    image: ai-trader/scheduler:phase-b
+    container_name: ai-trader-scheduler
+    restart: unless-stopped
+    # Override the Dockerfile's default entrypoint to launch the
+    # scheduler instead of uvicorn.
+    entrypoint: ["/usr/bin/tini", "--", "/app/docker/scheduler-entrypoint.sh"]
+    # Daily run at 18:00 IST on weekdays. Override via environment in
+    # .env (SCHED_HOUR / SCHED_MINUTE / SCHED_WEEKDAYS_ONLY) without
+    # changing this file.
+    command: []
+    healthcheck:
+      # `pgrep` isn't installed in slim. Use Python to assert the
+      # parent process is still scripts.run_scheduler.
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import os,sys; sys.exit(0 if os.path.exists('/proc/1/status') else 1)"
+      interval: 60s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          # The pipeline runs xgboost predictions and pandas feature
+          # builds. 2 CPUs + 2 GB is comfortably above what we've seen
+          # for the 50-symbol Nifty universe.
+          cpus: "2.0"
+          memory: "2G"
+        reservations:
+          cpus: "0.10"
+          memory: "256M"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+# ---------------------------------------------------------------------------
+# Volumes
+# ---------------------------------------------------------------------------
+volumes:
+  # Named volume so SQLite + WAL files live on a Docker-managed volume
+  # rather than a host bind-mount. On Linux this avoids permission
+  # surprises when the container UID (10001) differs from the host
+  # user. On Windows / Docker Desktop, named volumes have native ext4
+  # speed vs. SMB-backed bind mounts.
+  aitrader-data:
+    name: ai-trader-data

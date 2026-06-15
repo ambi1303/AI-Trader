@@ -99,6 +99,18 @@ def seeded_db(env: dict[str, str]) -> None:
                     1255.0, 100000, 'yfinance')
             """
         )
+        # Predictions for the watchlist: one above threshold (0.55), two below.
+        for sym, raw, cal in [("INFY", 0.71, 0.60),
+                              ("TCS", 0.64, 0.50),
+                              ("WIPRO", 0.58, 0.40)]:
+            c.execute(
+                """
+                INSERT INTO predictions_log (run_id, symbol, prediction_date,
+                    raw_prob, calibrated_prob, feature_snapshot_json)
+                VALUES ('run-test', ?, date('now'), ?, ?, '{}')
+                """,
+                (sym, raw, cal),
+            )
         conn.commit()
 
 
@@ -248,7 +260,8 @@ def test_api_snapshot_shape(client: TestClient,
     body = r.json()
     for k in ("as_of", "signals", "open_positions", "closed_recent",
               "realised_pnl_30d", "unrealised_pnl", "win_rate_30d_pct",
-              "n_open", "freshness", "model", "universe_size"):
+              "n_open", "freshness", "model", "universe_size",
+              "candidates", "threshold"):
         assert k in body, f"missing key: {k}"
     # Open position from the seed
     assert body["n_open"] == 1
@@ -257,6 +270,43 @@ def test_api_snapshot_shape(client: TestClient,
     assert body["open_positions"][0]["unrealised_pnl"] == pytest.approx(550.0)
     # 30d realised includes the TCS win
     assert body["realised_pnl_30d"] == pytest.approx(1000.0)
+
+
+def test_watchlist_candidates_ranked_with_threshold(
+    client: TestClient, env: dict[str, str]
+) -> None:
+    client.post(
+        "/login",
+        data={"username": env["WEB_USERNAME"],
+              "password": env["WEB_PASSWORD"]},
+    )
+    body = client.get("/api/snapshot").json()
+    cands = body["candidates"]
+    # Threshold comes from model_runs.metrics_json (0.55 in the seed).
+    assert body["threshold"] == pytest.approx(0.55)
+    syms = [c["symbol"] for c in cands]
+    # Ranked by calibrated prob desc: INFY (0.60) > TCS (0.50) > WIPRO (0.40)
+    assert syms[:3] == ["INFY", "TCS", "WIPRO"]
+    infy = cands[0]
+    assert infy["would_fire"] is True
+    assert infy["distance_to_threshold"] == pytest.approx(0.05)
+    # TCS is below threshold -> negative distance, does not fire.
+    tcs = cands[1]
+    assert tcs["would_fire"] is False
+    assert tcs["distance_to_threshold"] == pytest.approx(-0.05)
+
+
+def test_watchlist_renders_on_home(client: TestClient,
+                                   env: dict[str, str]) -> None:
+    client.post(
+        "/login",
+        data={"username": env["WEB_USERNAME"],
+              "password": env["WEB_PASSWORD"]},
+    )
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "Watchlist" in r.text
+    assert "FIRES" in r.text  # INFY crosses the threshold in the seed
 
 
 def test_signal_today_appears(client: TestClient,

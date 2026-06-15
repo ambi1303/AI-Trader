@@ -111,6 +111,12 @@ class BuildSummary:
 
 
 def _load_price_df(symbol: str, source: str = "bhavcopy") -> pd.DataFrame:
+    """Load OHLCV for a symbol, preferring BhavCopy but merging yfinance for
+    more recent dates not yet covered by BhavCopy.
+
+    This keeps the system current between BhavCopy ingests (yfinance updates
+    faster) while still using the authoritative NSE data where available.
+    """
     rows = fetch_all(
         """
         SELECT bar_date, open, high, low, close, volume
@@ -120,11 +126,30 @@ def _load_price_df(symbol: str, source: str = "bhavcopy") -> pd.DataFrame:
         """,
         (symbol, source),
     )
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame([dict(r) for r in rows])
-    df["bar_date"] = pd.to_datetime(df["bar_date"]).dt.date
-    df = df.set_index("bar_date").sort_index()
+    df = pd.DataFrame([dict(r) for r in rows]) if rows else pd.DataFrame()
+    if not df.empty:
+        df["bar_date"] = pd.to_datetime(df["bar_date"]).dt.date
+        df = df.set_index("bar_date").sort_index()
+
+    # Supplement with yfinance rows that are NEWER than the bhavcopy max date.
+    yf_rows = fetch_all(
+        """
+        SELECT bar_date, open, high, low, close, volume
+        FROM   price_data
+        WHERE  symbol = ? AND source = 'yfinance'
+              AND bar_date > COALESCE(
+                  (SELECT MAX(bar_date) FROM price_data
+                   WHERE symbol = ? AND source = ?), '1900-01-01')
+        ORDER BY bar_date
+        """,
+        (symbol, symbol, source),
+    )
+    if yf_rows:
+        yf = pd.DataFrame([dict(r) for r in yf_rows])
+        yf["bar_date"] = pd.to_datetime(yf["bar_date"]).dt.date
+        yf = yf.set_index("bar_date").sort_index()
+        df = pd.concat([df, yf]) if not df.empty else yf
+
     return df
 
 

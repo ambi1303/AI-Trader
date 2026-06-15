@@ -1,0 +1,57 @@
+# Render Infrastructure as Code
+# https://render.com/docs/infrastructure-as-code
+#
+# Deploy: connect this repo on Render Dashboard → auto-detects render.yaml
+#
+# Architecture:
+#   - Web Service: FastAPI dashboard (always-on, public HTTPS URL)
+#   - Cron Job: daily pipeline (ingest → features → predict → report)
+#   - Persistent Disk: SQLite DB + model artifacts survive redeploys
+
+services:
+  # ─── Web Dashboard ─────────────────────────────────────────────────────────
+  - type: web
+    name: ai-trader-web
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    region: singapore  # closest to India
+    healthCheckPath: /healthz
+    envVars:
+      - key: WEB_USERNAME
+        sync: false
+      - key: WEB_PASSWORD
+        sync: false
+      - key: WEB_SESSION_SECRET
+        sync: false
+      - key: WEB_BIND_HOST
+        value: 0.0.0.0
+      - key: WEB_BIND_PORT
+        value: "8000"
+      - key: WEB_FORWARDED_IPS
+        value: "*"
+      - key: TZ
+        value: Asia/Kolkata
+    disk:
+      name: ai-trader-data
+      mountPath: /app/data
+      sizeGB: 1  # free tier allows 1GB persistent disk
+
+  # ─── Daily Pipeline (Cron Job) ─────────────────────────────────────────────
+  - type: cron
+    name: ai-trader-daily
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    region: singapore
+    schedule: "30 11 * * 1-5"  # 11:30 UTC = 5:00 PM IST (after market close)
+    dockerCommand: "python -m scripts.run_daily"
+    envVars:
+      - key: TZ
+        value: Asia/Kolkata
+    disk:
+      name: ai-trader-data
+      mountPath: /app/data
+      sizeGB: 1
