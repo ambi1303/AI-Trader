@@ -390,17 +390,22 @@ def get_open_positions(as_of: str | None = None) -> list[OpenPositionRow]:
 
 
 def get_recent_closed(window_days: int = 30, limit: int = 50) -> list[ClosedTradeRow]:
+    # Compute the cutoff in Python (portable across SQLite and Postgres);
+    # exit_date is stored as an ISO 'YYYY-MM-DD' string in both backends so a
+    # lexical >= comparison is also a chronological one.
+    from datetime import timedelta
+    cutoff = (date.today() - timedelta(days=int(window_days))).isoformat()
     rows = _safe_fetch(
         """
         SELECT id, symbol, entry_date, exit_date, entry_price, exit_price,
                qty, pnl_rupees, pnl_pct, exit_reason
         FROM   paper_trades
         WHERE  status = 'closed' AND exit_date IS NOT NULL
-          AND  exit_date >= date('now', ?)
+          AND  exit_date >= ?
         ORDER  BY exit_date DESC, id DESC
         LIMIT  ?
         """,
-        (f"-{int(window_days)} days", int(limit)),
+        (cutoff, int(limit)),
     )
     out: list[ClosedTradeRow] = []
     for r in rows:
@@ -451,7 +456,7 @@ def get_latest_model() -> ModelRow | None:
         SELECT run_id, model_name, trained_from, trained_to,
                metrics_json, created_at
         FROM   model_runs
-        ORDER  BY created_at DESC, rowid DESC
+        ORDER  BY created_at DESC
         LIMIT  1
         """
     )

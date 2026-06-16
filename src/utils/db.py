@@ -12,15 +12,112 @@ Why these settings:
 
 from __future__ import annotations
 
+import os
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from src.utils.logger import get_logger
 from src.utils.secrets import get_settings, project_root
 
 log = get_logger("utils.db")
+
+
+# ---------------------------------------------------------------------------
+# Optional Postgres (Neon) read backend for the cloud dashboard.
+#
+# The local pipeline always uses SQLite (full dataset). When the dashboard is
+# deployed to the cloud it reads a small *mirror* of the dashboard-relevant
+# tables from a managed Postgres (Neon). To keep behaviour identical to SQLite
+# we only route the READ helpers (fetch_one/fetch_all) to Postgres, and only
+# when explicitly opted in via WEB_DB_BACKEND=postgres (so local runs never
+# accidentally read the smaller cloud mirror). Writes always go to SQLite.
+#
+# The connection string comes from the DATABASE_URL env var -- never
+# hardcoded -- and Neon mandates TLS (sslmode=require) by default.
+# ---------------------------------------------------------------------------
+
+_pg_tls = threading.local()
+
+
+def _pg_url() -> str | None:
+    url = (os.getenv("DATABASE_URL") or "").strip()
+    return url or None
+
+
+def use_postgres() -> bool:
+    """True when reads should be served from the Postgres mirror.
+
+    Deterministic and opt-in: requires WEB_DB_BACKEND=postgres *and* a
+    DATABASE_URL. Local development and the test suite never set the flag, so
+    they always use SQLite.
+    """
+    backend = (os.getenv("WEB_DB_BACKEND") or "").strip().lower()
+    return backend == "postgres" and _pg_url() is not None
+
+
+def _to_pg(query: str) -> str:
+    """Translate SQLite ``?`` placeholders to psycopg ``%s``.
+
+    Our read queries never contain a literal ``?`` or ``%`` inside string
+    literals, so this straight substitution is safe. (Date/`rowid` dialect
+    differences are handled in the queries themselves, not here.)
+    """
+    return query.replace("?", "%s")
+
+
+def _pg_connect():
+    import psycopg
+    from psycopg.rows import dict_row
+
+    return psycopg.connect(
+        _pg_url(),
+        autocommit=True,            # read-only SELECTs; avoid idle-in-txn
+        connect_timeout=15,
+        row_factory=dict_row,       # rows behave like dicts (row["col"])
+    )
+
+
+def _pg_conn():
+    """A per-thread cached Postgres connection (Starlette runs sync DB work in
+    a bounded threadpool, so one connection per worker thread is plenty)."""
+    conn = getattr(_pg_tls, "conn", None)
+    if conn is not None and not conn.closed:
+        return conn
+    conn = _pg_connect()
+    _pg_tls.conn = conn
+    return conn
+
+
+def _pg_reset() -> None:
+    conn = getattr(_pg_tls, "conn", None)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+    _pg_tls.conn = None
+
+
+def _pg_query(query: str, params: tuple, *, one: bool):
+    import psycopg
+
+    sql = _to_pg(query)
+    try:
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchone() if one else list(cur.fetchall())
+    except psycopg.Error as exc:
+        # Stale pooled connection (Neon idles them out) -> reconnect once.
+        log.warning("postgres read failed, retrying once: {}", exc)
+        _pg_reset()
+        conn = _pg_conn()
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchone() if one else list(cur.fetchall())
 
 
 def resolve_db_path(db_path: str | None = None) -> Path:
@@ -83,7 +180,13 @@ def execute_script(script_sql: str, db_path: str | None = None) -> None:
         conn.close()
 
 
-def fetch_one(query: str, params: tuple = (), db_path: str | None = None) -> sqlite3.Row | None:
+def fetch_one(query: str, params: tuple = (), db_path: str | None = None) -> Any | None:
+    # Route to the Postgres mirror only for the default DB (no explicit
+    # db_path) and only when the cloud backend is opted in. Returns a
+    # dict-like row in both backends (sqlite3.Row and psycopg dict_row both
+    # support row["col"] and dict(row)).
+    if db_path is None and use_postgres():
+        return _pg_query(query, params, one=True)
     conn = connect(db_path, read_only=True)
     try:
         cur = conn.execute(query, params)
@@ -92,7 +195,9 @@ def fetch_one(query: str, params: tuple = (), db_path: str | None = None) -> sql
         conn.close()
 
 
-def fetch_all(query: str, params: tuple = (), db_path: str | None = None) -> list[sqlite3.Row]:
+def fetch_all(query: str, params: tuple = (), db_path: str | None = None) -> list[Any]:
+    if db_path is None and use_postgres():
+        return _pg_query(query, params, one=False)
     conn = connect(db_path, read_only=True)
     try:
         cur = conn.execute(query, params)

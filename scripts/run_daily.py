@@ -225,6 +225,23 @@ def _step_reconcile(as_of: str | None) -> dict[str, Any]:
     return summary.to_dict()
 
 
+def _step_publish_cloud() -> dict[str, Any]:
+    """Mirror the dashboard subset to Neon Postgres so the cloud dashboard
+    reflects today's run. Self-skips when DATABASE_URL is not configured
+    (i.e. when the cloud mirror isn't in use). Best-effort -- a failure here
+    never affects the local run or the report."""
+    import os
+    # Safety: never publish from inside the test suite (pytest sets this),
+    # so a test run can't truncate/overwrite the real cloud mirror.
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return {"skipped": True, "reason": "pytest"}
+    if not (os.getenv("DATABASE_URL") or "").strip():
+        return {"skipped": True, "reason": "no DATABASE_URL"}
+    from src.cloud.publish import publish
+    summary = publish()
+    return {"tables": len(summary), "rows": sum(summary.values())}
+
+
 def _step_notify(as_of: str | None, dry_run: bool, threshold: float | None,
                  result: DailyRunResult) -> dict[str, Any]:
     dispatch = send_daily(
@@ -278,6 +295,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                    help="Skip paper-trade reconciliation.")
     p.add_argument("--skip-notify", action="store_true",
                    help="Skip the dispatch step.")
+    p.add_argument("--skip-publish", action="store_true",
+                   help="Skip publishing the dashboard subset to the Neon "
+                        "cloud mirror. By default it runs last and self-skips "
+                        "if DATABASE_URL is not set.")
     p.add_argument("--print-summary", action="store_true",
                    help="Print the JSON run summary at the end.")
     return p.parse_args(argv)
@@ -341,6 +362,11 @@ def main(argv: list[str] | None = None) -> int:
             lambda: _step_notify(as_of, args.dry_run, args.threshold, result),
             run_id=run_id, result=result,
         )
+
+    # Step 8: publish to the cloud mirror (last; never blocks the report).
+    if not args.skip_publish:
+        _run_step("publish_cloud", _step_publish_cloud,
+                  run_id=run_id, result=result)
 
     if args.print_summary:
         print(json.dumps(result.to_dict(), indent=2, default=str))
