@@ -98,6 +98,14 @@ _PRED_INSERT_SQL = """
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
+# Make persistence idempotent: re-scoring the same (run_id, symbol, date) -- e.g.
+# running predict_today more than once in a day -- must overwrite, not pile up
+# duplicate rows (which the dashboard would otherwise show as repeated names).
+_PRED_DELETE_SQL = (
+    "DELETE FROM predictions_log "
+    "WHERE run_id = ? AND symbol = ? AND prediction_date = ?"
+)
+
 
 def _load_feature_row(symbol: str, on_date: date | None) -> pd.DataFrame:
     if on_date is None:
@@ -163,6 +171,7 @@ def predict_for_symbol(
     feature_date = row["feature_date"].iloc[0]
 
     if persist:
+        execute(_PRED_DELETE_SQL, (meta.run_id, symbol, str(feature_date)))
         execute(
             _PRED_INSERT_SQL,
             (
@@ -259,6 +268,7 @@ def predict_for_universe_cross_sectional(
             row, X, regressor=regressor, triclass=triclass, meta=meta
         )
         if persist:
+            execute(_PRED_DELETE_SQL, (meta.run_id, sym, str(feature_date)))
             execute(
                 _PRED_INSERT_SQL,
                 (
