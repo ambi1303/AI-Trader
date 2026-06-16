@@ -71,6 +71,35 @@ CREATE TABLE IF NOT EXISTS feature_data (
     PRIMARY KEY (symbol, feature_date)
 );
 
+-- Index data (Nifty / VIX / sector indices) -- needed by the cloud pipeline
+-- to compute regime features. Tiny, so mirrored in full.
+CREATE TABLE IF NOT EXISTS index_data (
+    index_symbol TEXT NOT NULL,
+    bar_date     TEXT NOT NULL,
+    open         DOUBLE PRECISION,
+    high         DOUBLE PRECISION,
+    low          DOUBLE PRECISION,
+    close        DOUBLE PRECISION,
+    volume       BIGINT,
+    source       TEXT NOT NULL,
+    ingested_at  TEXT,
+    PRIMARY KEY (index_symbol, bar_date, source)
+);
+CREATE INDEX IF NOT EXISTS ix_index_data_idx_date ON index_data(index_symbol, bar_date);
+
+-- Corporate actions -- needed for split/bonus-aware feature computation.
+CREATE TABLE IF NOT EXISTS corporate_actions (
+    symbol       TEXT NOT NULL,
+    ex_date      TEXT NOT NULL,
+    action_type  TEXT NOT NULL,
+    ratio_from   BIGINT,
+    ratio_to     BIGINT,
+    amount       DOUBLE PRECISION,
+    notes        TEXT,
+    source       TEXT NOT NULL DEFAULT 'seed',
+    PRIMARY KEY (symbol, ex_date, action_type)
+);
+
 -- ---------------------------------------------------------------
 -- Fundamentals
 -- ---------------------------------------------------------------

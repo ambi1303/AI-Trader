@@ -30,9 +30,11 @@ log = get_logger("cloud.publish")
 
 _SCHEMA_SQL = Path(__file__).resolve().parent / "schema_pg.sql"
 
-# Default history window for the chart slice: ~260 trading days ≈ 380 calendar
-# days, matching the dashboard's get_ohlc(limit=260).
-_DEFAULT_WINDOW_DAYS = 380
+# History window for the price slice. The dashboard only charts the last ~260
+# trading days, but the *cloud pipeline* rebuilds features from this mirror and
+# the longest feature lookback is 252 trading days (dd_from_high_252d), so we
+# keep ~1.5 calendar years to leave margin for warm-up.
+_DEFAULT_WINDOW_DAYS = 520
 
 _PRICE_SOURCES_IN = "('angelone','bhavcopy','yfinance')"
 
@@ -113,6 +115,22 @@ _SPECS: list[_Spec] = [
         "SELECT symbol, as_of_date, source, pe_ttm, pb, roe, debt_to_equity, "
         "profit_margin, revenue_growth, earnings_growth, dividend_yield, "
         "market_cap, eps_ttm, book_value FROM fundamental_data",
+    ),
+    # Index data + corporate actions are needed by the cloud feature builder
+    # (regime features + split/bonus adjustment). Both are small -> full copy.
+    _Spec(
+        "index_data",
+        ["index_symbol", "bar_date", "open", "high", "low", "close", "volume",
+         "source", "ingested_at"],
+        "SELECT index_symbol, bar_date, open, high, low, close, volume, "
+        "source, ingested_at FROM index_data",
+    ),
+    _Spec(
+        "corporate_actions",
+        ["symbol", "ex_date", "action_type", "ratio_from", "ratio_to",
+         "amount", "notes", "source"],
+        "SELECT symbol, ex_date, action_type, ratio_from, ratio_to, amount, "
+        "notes, source FROM corporate_actions",
     ),
     # Recent slice only -- these two are loaded via COPY with a date cutoff.
     _Spec(

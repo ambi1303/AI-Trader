@@ -1,0 +1,86 @@
+name: Daily pipeline
+
+# Runs the full end-of-day pipeline in the cloud so it no longer depends on a
+# laptop being on: ingest (yfinance/BhavCopy) -> features -> predict -> signals
+# -> paper-trade reconcile -> email report -> publish to the Neon mirror that
+# the Render dashboard reads.
+#
+# Angel One is intentionally skipped here: GitHub runners have rotating IPs that
+# Angel One's static-IP allowlist rejects. EOD closes come from BhavCopy/yfinance
+# (BhavCopy is NSE's official EOD source). Live intraday LTP on the dashboard is
+# still served by Render, which keeps the whitelisted static IP.
+
+on:
+  schedule:
+    # 12:45 UTC = 18:15 IST, Monday-Friday (after the NSE close + data settle).
+    - cron: "45 12 * * 1-5"
+  workflow_dispatch: {}   # manual "Run workflow" button for testing
+
+# Least privilege: the job only reads the repo. Secrets are injected per-step.
+permissions:
+  contents: read
+
+# Never let two daily runs overlap and clobber the shared Neon mirror.
+concurrency:
+  group: daily-pipeline
+  cancel-in-progress: false
+
+jobs:
+  daily:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      # Cloud mirror (used by the seed step and the publish step). Never hardcoded.
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      # Email (daily report). All values come from repo secrets.
+      SMTP_HOST: ${{ secrets.SMTP_HOST }}
+      SMTP_PORT: ${{ secrets.SMTP_PORT }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+      EMAIL_TO: ${{ secrets.EMAIL_TO }}
+      # NOTE: WEB_DB_BACKEND is deliberately NOT set here. The pipeline must read
+      # and write the local SQLite DB; only the Render dashboard reads Postgres.
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Restore the working SQLite DB built by the previous run. The key is
+      # unique per run (so each run saves a fresh copy), and restore-keys falls
+      # back to the most recent prior "trading-db-" cache.
+      - name: Restore working DB (cache)
+        uses: actions/cache/restore@v4
+        with:
+          path: data/trading.db
+          key: trading-db-${{ github.run_id }}
+          restore-keys: |
+            trading-db-
+
+      # On a cache miss (first run / eviction) rebuild the DB from the Neon
+      # mirror. Self-skips instantly when the cache already provided a DB.
+      - name: Seed DB from Neon if empty
+        run: python -m src.cloud.seed_from_neon
+
+      # The actual daily pipeline. --skip-angelone keeps us off the static-IP
+      # path; publish_cloud at the end refreshes the Render dashboard's mirror.
+      - name: Run daily pipeline
+        run: python -m scripts.run_daily --skip-angelone --print-summary
+
+      # Persist the updated DB for the next run (runs even if the pipeline
+      # partially failed, so we keep whatever progress was made).
+      - name: Save working DB (cache)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data/trading.db
+          key: trading-db-${{ github.run_id }}
