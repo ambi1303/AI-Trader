@@ -99,6 +99,34 @@ CREATE TABLE IF NOT EXISTS news_headlines (
 CREATE INDEX IF NOT EXISTS ix_news_symbol_date ON news_headlines(symbol, published_at);
 
 -- ---------------------------------------------------------------
+-- Fundamentals (valuation / quality / growth)
+-- ---------------------------------------------------------------
+-- Point-in-time fundamental snapshots per symbol. ``as_of_date`` is the
+-- date from which the row's ratios are valid (a quarterly report date for
+-- reconstructed history, or the ingest date for the current live snapshot).
+-- Feature building does an as-of (<=) join + forward-fill so a feature_date
+-- never sees a fundamental that was published after it (no look-ahead).
+CREATE TABLE IF NOT EXISTS fundamental_data (
+    symbol           TEXT NOT NULL,
+    as_of_date       TEXT NOT NULL,           -- ISO YYYY-MM-DD
+    pe_ttm           REAL,                     -- trailing twelve-month P/E
+    pb               REAL,                     -- price / book
+    roe              REAL,                     -- return on equity (fraction)
+    debt_to_equity   REAL,                     -- total debt / equity
+    profit_margin    REAL,                     -- net profit margin (fraction)
+    revenue_growth   REAL,                     -- YoY revenue growth (fraction)
+    earnings_growth  REAL,                     -- YoY earnings growth (fraction)
+    dividend_yield   REAL,                     -- fraction
+    market_cap       REAL,                     -- rupees
+    eps_ttm          REAL,                     -- trailing twelve-month EPS
+    book_value       REAL,                     -- book value per share
+    source           TEXT NOT NULL,            -- yfinance_snapshot | yfinance_reconstructed
+    ingested_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (symbol, as_of_date)
+);
+CREATE INDEX IF NOT EXISTS ix_fundamental_symbol_date ON fundamental_data(symbol, as_of_date);
+
+-- ---------------------------------------------------------------
 -- Models / signals (Weeks 3-6)
 -- ---------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS model_runs (
@@ -121,6 +149,14 @@ CREATE TABLE IF NOT EXISTS predictions_log (
     raw_prob        REAL,
     calibrated_prob REAL,
     feature_snapshot_json TEXT,
+    -- tri-class + price-target outputs (schema v5)
+    verdict          TEXT,                 -- BUY | HOLD | SELL
+    prob_buy         REAL,
+    prob_hold        REAL,
+    prob_sell        REAL,
+    predicted_return REAL,                 -- expected fwd return over horizon (fraction)
+    target_price     REAL,
+    stop_price       REAL,
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     FOREIGN KEY (run_id) REFERENCES model_runs(run_id)
 );
@@ -305,6 +341,16 @@ CREATE TABLE IF NOT EXISTS feature_data (
     hit_lower_circuit    INTEGER,
     days_since_circuit   INTEGER,
     low_volume_flag      INTEGER,
+    -- fundamentals (as-of joined from fundamental_data, no look-ahead)
+    pe_ttm               REAL,
+    pb                   REAL,
+    roe                  REAL,
+    debt_to_equity       REAL,
+    profit_margin        REAL,
+    revenue_growth       REAL,
+    earnings_growth      REAL,
+    dividend_yield       REAL,
+    log_market_cap       REAL,
     -- meta
     feature_set_version  INTEGER NOT NULL DEFAULT 1,
     computed_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),

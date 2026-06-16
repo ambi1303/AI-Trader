@@ -3,7 +3,7 @@
 
 enabled_channels:
   email: true
-  whatsapp: true
+  whatsapp: false   # using email for the daily report; flip on if you add CallMeBot
 
 # Whatsapp provider: "callmebot" (free, personal) or "twilio" (paid, multi-recipient).
 whatsapp_provider: callmebot

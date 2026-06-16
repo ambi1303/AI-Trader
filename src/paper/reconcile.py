@@ -13,8 +13,9 @@ Design choices
 - Stop / target / trailing / time logic comes from
   ``src.backtesting.risk`` -- live and backtest decisions are identical
   byte-for-byte for the same inputs.
-- We pull bar prices from ``price_data`` filtered to ``source='yfinance'``
-  (cross-source validation has already promoted the canonical OHLCV).
+- We pull the day's bar from ``price_data`` across all sources, preferring
+  Angel One > BhavCopy > yfinance (same ordering as the dashboard and the
+  daily report) so marks/exits never disagree with what the UI shows.
 """
 
 from __future__ import annotations
@@ -75,24 +76,51 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _bar_for(symbol: str, on_date: str, *, source: str = "yfinance") -> dict[str, float] | None:
-    """Today's bar from ``price_data`` (yfinance source by default)."""
-    row = fetch_one(
-        """
-        SELECT open, high, low, close, volume
-        FROM   price_data
-        WHERE  symbol = ? AND bar_date = ? AND source = ?
-        """,
-        (symbol, on_date, source),
-    )
-    if not row:
+# Price sources reconcile may read for the day's bar, in preference order on
+# a tie: Angel One (broker feed) > BhavCopy (official EOD) > yfinance. This
+# MUST match src/web/queries.py and report_builder so paper marks/exits,
+# the dashboard, and the report all agree on the day's price.
+_PRICE_SOURCES_IN = "('angelone','bhavcopy','yfinance')"
+_SRC_RANK_SQL = (
+    "CASE source WHEN 'angelone' THEN 0 WHEN 'bhavcopy' THEN 1 ELSE 2 END"
+)
+
+
+def _bar_for(symbol: str, on_date: str, *, source: str | None = None) -> dict[str, float] | None:
+    """The day's bar from ``price_data``.
+
+    By default reads across all sources and prefers Angel One, then BhavCopy,
+    then yfinance for the same ``bar_date`` (see _SRC_RANK_SQL). Pass an
+    explicit ``source`` to pin to one feed (used by tests).
+    """
+    if source is not None:
+        row = fetch_one(
+            """
+            SELECT open, high, low, close, volume
+            FROM   price_data
+            WHERE  symbol = ? AND bar_date = ? AND source = ?
+            """,
+            (symbol, on_date, source),
+        )
+    else:
+        row = fetch_one(
+            f"""
+            SELECT open, high, low, close, volume
+            FROM   price_data
+            WHERE  symbol = ? AND bar_date = ? AND source IN {_PRICE_SOURCES_IN}
+            ORDER  BY {_SRC_RANK_SQL}
+            LIMIT  1
+            """,
+            (symbol, on_date),
+        )
+    if not row or row["close"] is None:
         return None
     return {
-        "open": float(row["open"]),
-        "high": float(row["high"]),
-        "low": float(row["low"]),
+        "open": float(row["open"]) if row["open"] is not None else float(row["close"]),
+        "high": float(row["high"]) if row["high"] is not None else float(row["close"]),
+        "low": float(row["low"]) if row["low"] is not None else float(row["close"]),
         "close": float(row["close"]),
-        "volume": int(row["volume"]),
+        "volume": int(row["volume"]) if row["volume"] is not None else 0,
     }
 
 
@@ -121,6 +149,23 @@ def _pending_signals_for(conn: sqlite3.Connection, signal_date: str) -> list[dic
         (signal_date,),
     )
     return [dict(r) for r in cur.fetchall()]
+
+
+def _pending_exits_for(conn: sqlite3.Connection, signal_date: str) -> dict[str, dict[str, Any]]:
+    """Model-driven EXIT signals (side='EXIT') pending for ``signal_date``.
+
+    Keyed by symbol so the close pass can give them priority over the
+    ordinary stop/target/time evaluation.
+    """
+    cur = conn.execute(
+        """
+        SELECT id, symbol, qty, confidence
+        FROM   signal_outbox
+        WHERE  signal_date = ? AND status = 'pending' AND side = 'EXIT'
+        """,
+        (signal_date,),
+    )
+    return {r["symbol"]: dict(r) for r in cur.fetchall()}
 
 
 def _holding_days(entry: str, today: str) -> int:
@@ -243,6 +288,58 @@ def _close_one(
         "holding_days": held,
     })
     return True
+
+
+def _close_model_exit(
+    conn: sqlite3.Connection,
+    pos: dict[str, Any],
+    bar: dict[str, float],
+    exit_sig: dict[str, Any],
+    *,
+    cost_cfg: CostConfig,
+    as_of: str,
+    summary: ReconcileSummary,
+) -> None:
+    """Close a held position because the model now says SELL.
+
+    Fills at today's close (the verdict is an end-of-day decision). Marks
+    the EXIT signal executed so re-runs are idempotent.
+    """
+    qty = int(pos["qty"])
+    entry = float(pos["entry_price"])
+    fill_price = float(bar["close"])
+
+    gross, cost = _force_close_at(
+        exit_price=fill_price, qty=qty, entry_price=entry,
+        symbol=pos["symbol"], cost_cfg=cost_cfg,
+    )
+    net = gross - cost
+    pnl_pct = 0.0 if entry * qty == 0 else (net / (entry * qty)) * 100.0
+    held = _holding_days(pos["entry_date"], as_of)
+
+    conn.execute(
+        """
+        UPDATE paper_trades
+        SET status = 'closed', exit_date = ?, exit_price = ?, pnl_rupees = ?,
+            pnl_pct = ?, cost_rupees = ?, exit_reason = 'model_sell',
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (as_of, fill_price, net, pnl_pct, cost, _utc_now(), pos["id"]),
+    )
+    conn.execute(
+        "UPDATE signal_outbox SET status = 'executed', sent_at = ? WHERE id = ?",
+        (_utc_now(), exit_sig["id"]),
+    )
+    summary.closed.append({
+        "id": pos["id"],
+        "symbol": pos["symbol"],
+        "exit_price": fill_price,
+        "exit_reason": "model_sell",
+        "net_pnl": net,
+        "pnl_pct": pnl_pct,
+        "holding_days": held,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +492,7 @@ def reconcile(
 
     with transaction() as conn:
         # ---------- close pass ----------
+        model_exits = _pending_exits_for(conn, today)
         for pos in _open_positions(conn):
             bar = _bar_for(pos["symbol"], today)
             if bar is None:
@@ -403,9 +501,15 @@ def reconcile(
                     "reason": "no_bar_for_close",
                 })
                 continue
-            _close_one(conn, pos, bar,
-                       risk=risk, cost_cfg=cost_cfg,
-                       as_of=today, summary=summary)
+            # A protective stop/target hit still takes precedence (it may have
+            # triggered intraday before the EOD SELL verdict); only fall back
+            # to the model exit when no risk rule fired.
+            closed = _close_one(conn, pos, bar,
+                                risk=risk, cost_cfg=cost_cfg,
+                                as_of=today, summary=summary)
+            if not closed and pos["symbol"] in model_exits:
+                _close_model_exit(conn, pos, bar, model_exits[pos["symbol"]],
+                                  cost_cfg=cost_cfg, as_of=today, summary=summary)
 
         # ---------- open pass ----------
         for sig in _pending_signals_for(conn, today):

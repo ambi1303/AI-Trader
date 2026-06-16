@@ -26,7 +26,10 @@ import numpy as np
 import pandas as pd
 from sklearn.calibration import CalibratedClassifierCV
 
-from src.models.xgboost_classifier import DeterministicXGBClassifier
+from src.models.xgboost_classifier import (
+    DeterministicXGBClassifier,
+    DeterministicXGBMulticlass,
+)
 from src.utils.logger import get_logger
 
 log = get_logger("models.calib")
@@ -92,3 +95,52 @@ class CalibratedXGB:
 
     def predict_raw(self, X: pd.DataFrame) -> np.ndarray:
         return self.base_model.predict_proba(X)[:, 1]
+
+
+def fit_isotonic_multiclass(
+    base_model: DeterministicXGBMulticlass,
+    X_calib: pd.DataFrame,
+    y_calib: pd.Series | np.ndarray,
+) -> CalibratedClassifierCV:
+    """Isotonic-calibrate a prefit multiclass model (one-vs-rest).
+
+    sklearn applies isotonic per class then renormalises, which is exactly
+    what we want for the SELL/HOLD/BUY verdict probabilities to be
+    trustworthy (so a 0.55 BUY probability really means ~55% historically).
+    """
+    if not isinstance(X_calib, pd.DataFrame):
+        raise TypeError("X_calib must be a DataFrame")
+    y_arr = np.asarray(y_calib).astype(int)
+    if len(np.unique(y_arr)) < 2:
+        raise ValueError("Calibration set needs >= 2 classes present")
+    cal = CalibratedClassifierCV(estimator=base_model, method="isotonic", cv="prefit")
+    cal.fit(X_calib, y_arr)
+    log.info("Fit isotonic multiclass calibrator on {} rows", len(X_calib))
+    return cal
+
+
+class CalibratedMulticlass:
+    """Owns a (base multiclass model, calibrator) pair for the verdict head.
+
+    Mirrors :class:`CalibratedXGB` but returns the full class-probability
+    matrix. ``class_labels`` is the int->label mapping (e.g.
+    ``("SELL","HOLD","BUY")``) carried so the predictor and UI never guess.
+    """
+
+    def __init__(
+        self,
+        base_model: DeterministicXGBMulticlass,
+        calibrator: CalibratedClassifierCV,
+        class_labels: tuple[str, ...],
+    ) -> None:
+        self.base_model = base_model
+        self.calibrator = calibrator
+        self.class_labels = tuple(class_labels)
+
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        _ = self.base_model.predict_proba(X)  # raises on column drift
+        return self.calibrator.predict_proba(X)
+
+    def predict_label(self, X: pd.DataFrame) -> list[str]:
+        idx = self.predict_proba(X).argmax(axis=1)
+        return [self.class_labels[i] for i in idx]

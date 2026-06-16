@@ -1,0 +1,203 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}{{ symbol }} &middot; AI Trader{% endblock %}
+
+{% block content %}
+{% set p = d.prediction %}
+{% set f = d.fundamentals %}
+{% set s = d.summary %}
+{% set fr = d.fundamental_ratings %}
+
+{# ---- Header ---- #}
+<div class="mb-4 flex items-center justify-between gap-3 flex-wrap">
+  <div class="flex items-center gap-3">
+    <a href="/" class="text-slate-400 hover:text-slate-100 text-sm">&larr; Back</a>
+    <h1 class="text-2xl font-bold tracking-tight">{{ symbol }}</h1>
+    <span class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300">{{ d.sector }}</span>
+  </div>
+  <div class="flex items-center gap-3">
+    {% if p %}{{ m.verdict_badge(p.verdict) }}{% endif %}
+    <div class="text-right" data-live-symbol="{{ symbol }}">
+      <div class="text-xs text-slate-400 flex items-center justify-end gap-1.5">
+        <span>Price</span>
+        <span class="live-badge inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded border bg-slate-700/40 text-slate-300 border-slate-600">Closed</span>
+      </div>
+      <div class="text-lg font-semibold flex items-center justify-end gap-2">
+        <span class="live-ltp">{{ m.num(d.last_close) }}</span>
+        <span class="live-change text-xs font-normal"></span>
+      </div>
+      {% if d.as_of %}<div class="text-xs font-normal text-slate-500">as of {{ d.as_of }}</div>{% endif %}
+    </div>
+  </div>
+</div>
+
+{# ---- Plain-language summary banner ---- #}
+{% if s %}
+{% set banner = {
+     'good': 'bg-emerald-500/10 border-emerald-700 text-emerald-100',
+     'ok':   'bg-slate-700/30 border-slate-600 text-slate-100',
+     'bad':  'bg-rose-500/10 border-rose-700 text-rose-100',
+     'warn': 'bg-amber-500/10 border-amber-700 text-amber-100',
+     'neutral': 'bg-slate-800/50 border-slate-700 text-slate-300'
+   }.get(s.tone, 'bg-slate-800/50 border-slate-700 text-slate-300') %}
+<div class="mb-5 rounded-xl border px-4 py-3 {{ banner }}">
+  <div class="font-semibold">{{ s.headline }}</div>
+  {% if s.detail %}<div class="text-sm mt-1 opacity-90">{{ s.detail }}</div>{% endif %}
+  {% if s.marginal %}
+  <div class="mt-2 inline-flex items-center gap-1.5 text-xs bg-amber-500/15 border border-amber-700 text-amber-200 px-2 py-1 rounded">
+    &#9888; Low conviction: the expected move is smaller than typical round-trip
+    trading costs (~{{ "%.2f"|format(d.round_trip_cost_pct) }}%).
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+{# ---- Decision cards ---- #}
+<div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-5">
+  <div class="rounded-xl bg-slate-900 border border-slate-800 p-3">
+    <div class="text-xs text-slate-400">Verdict</div>
+    <div class="mt-1 text-lg font-semibold">
+      {% if p %}{{ m.verdict_badge(p.verdict) }}{% else %}<span class="text-slate-500">&mdash;</span>{% endif %}
+    </div>
+  </div>
+  <div class="rounded-xl bg-slate-900 border border-slate-800 p-3">
+    <div class="text-xs text-slate-400" title="Model's expected price ~1 month out">Model target &middot; ~1mo</div>
+    <div class="mt-1 text-lg font-semibold">{{ m.num(p.target_price if p else None) }}</div>
+    <div class="text-xs mt-0.5">{{ m.pct(d.upside_pct) }}</div>
+  </div>
+  <div class="rounded-xl bg-slate-900 border border-slate-800 p-3">
+    <div class="text-xs text-slate-400" title="Risk exit level (ATR-based)">Suggested stop</div>
+    <div class="mt-1 text-lg font-semibold">{{ m.num(p.stop_price if p else None) }}</div>
+  </div>
+  <div class="rounded-xl bg-slate-900 border border-slate-800 p-3">
+    <div class="text-xs text-slate-400" title="Calibrated probability the stock rises over the horizon">"Up" probability</div>
+    <div class="mt-1 text-lg font-semibold">
+      {% if p and p.calibrated_prob is not none %}{{ "%.0f"|format(p.calibrated_prob * 100) }}%{% else %}<span class="text-slate-500">&mdash;</span>{% endif %}
+    </div>
+  </div>
+</div>
+
+{% if d.held %}
+<div class="mb-5 rounded-lg bg-amber-500/10 border border-amber-700 text-amber-200 text-sm px-3 py-2">
+  You hold {{ d.held.qty }} shares (entry {{ m.num(d.held.entry_price) }} on {{ d.held.entry_date }}).
+  {% if p and p.verdict == 'SELL' %}The model now flags <b>SELL</b> &mdash; treated as an exit/avoid signal (long-only).{% endif %}
+</div>
+{% endif %}
+
+{# ---- Chart ---- #}
+<div class="rounded-xl bg-slate-900 border border-slate-800 p-3 mb-5">
+  <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
+    <h2 class="text-sm font-semibold text-slate-300">Price &amp; indicators</h2>
+    <div class="text-xs text-slate-500 flex gap-3 flex-wrap">
+      <span><span class="inline-block w-3 h-0.5 align-middle" style="background:#3b82f6"></span> EMA20</span>
+      <span><span class="inline-block w-3 h-0.5 align-middle" style="background:#f59e0b"></span> EMA50</span>
+      <span><span class="inline-block w-3 h-0.5 align-middle" style="background:#a855f7"></span> EMA200</span>
+      <span><span class="inline-block w-3 h-0.5 align-middle" style="background:#22c55e"></span> Target</span>
+      <span><span class="inline-block w-3 h-0.5 align-middle" style="background:#ef4444"></span> Stop</span>
+    </div>
+  </div>
+  <div id="price-chart" data-symbol="{{ symbol }}" class="w-full" style="height:360px"></div>
+  <div class="mt-2 text-xs text-slate-400">RSI(14) &middot; <span class="text-slate-500">&gt;70 overbought, &lt;30 oversold</span></div>
+  <div id="rsi-chart" class="w-full" style="height:110px"></div>
+  <div class="mt-2 text-xs text-slate-400">MACD(12,26,9) &middot; <span class="text-slate-500">momentum</span></div>
+  <div id="macd-chart" class="w-full" style="height:120px"></div>
+  <div id="chart-error" class="text-xs text-rose-400 mt-2 hidden">Chart data unavailable.</div>
+</div>
+
+{# ---- Verdict confidence + Fundamentals ---- #}
+<div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+  <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
+    <h2 class="text-sm font-semibold text-slate-300 mb-3">Model confidence</h2>
+    {% if p %}
+    <div class="space-y-3 text-sm">
+      {% set pb = (p.prob_buy or 0) * 100 %}
+      {% set ph = (p.prob_hold or 0) * 100 %}
+      {% set ps = (p.prob_sell or 0) * 100 %}
+      <div>
+        <div class="flex justify-between"><span class="text-emerald-300">BUY</span><span>{{ "%.1f"|format(pb) }}%</span></div>
+        <div class="h-2 bg-slate-800 rounded mt-1"><div class="h-2 bg-emerald-500 rounded" style="width: {{ pb }}%"></div></div>
+      </div>
+      <div>
+        <div class="flex justify-between"><span class="text-amber-300">HOLD</span><span>{{ "%.1f"|format(ph) }}%</span></div>
+        <div class="h-2 bg-slate-800 rounded mt-1"><div class="h-2 bg-amber-500 rounded" style="width: {{ ph }}%"></div></div>
+      </div>
+      <div>
+        <div class="flex justify-between"><span class="text-rose-300">SELL</span><span>{{ "%.1f"|format(ps) }}%</span></div>
+        <div class="h-2 bg-slate-800 rounded mt-1"><div class="h-2 bg-rose-500 rounded" style="width: {{ ps }}%"></div></div>
+      </div>
+      <div class="pt-2 text-xs text-slate-400 border-t border-slate-800 mt-3 space-y-1">
+        <div>Predicted return: <span class="text-slate-200">{{ m.pct((p.predicted_return * 100) if p.predicted_return is not none else None) }}</span>
+          over ~1 month &middot; as of {{ p.prediction_date }}</div>
+        <div class="text-slate-500">Verdict (Buy/Hold/Sell) is a separate model head from the
+          entry signal; entries fire only on the "Up" probability above the threshold.</div>
+      </div>
+    </div>
+    {% else %}
+    <p class="text-slate-500 text-sm">No prediction available for this symbol yet.</p>
+    {% endif %}
+  </div>
+
+  <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="text-sm font-semibold text-slate-300">Fundamentals</h2>
+      {{ m.stale_badge(d.fundamentals_staleness) }}
+    </div>
+    {% if f %}
+    <dl class="space-y-2 text-sm">
+      <div class="flex items-center justify-between border-b border-slate-800 pb-1.5">
+        <dt class="text-slate-400">P/E (TTM)</dt>
+        <dd class="flex items-center gap-2"><span class="tabular-nums">{{ m.num(f.pe_ttm, 1) }}</span>{{ m.health_badge(fr.pe) }}</dd>
+      </div>
+      <div class="flex items-center justify-between border-b border-slate-800 pb-1.5">
+        <dt class="text-slate-400">P/B</dt>
+        <dd class="tabular-nums">{{ m.num(f.pb, 1) }}</dd>
+      </div>
+      <div class="flex items-center justify-between border-b border-slate-800 pb-1.5">
+        <dt class="text-slate-400">Return on equity</dt>
+        <dd class="flex items-center gap-2"><span class="tabular-nums">{{ m.pct((f.roe * 100) if f.roe is not none else None) }}</span>{{ m.health_badge(fr.roe) }}</dd>
+      </div>
+      <div class="flex items-center justify-between border-b border-slate-800 pb-1.5">
+        <dt class="text-slate-400">Debt / equity</dt>
+        <dd class="flex items-center gap-2"><span class="tabular-nums">{{ m.num(f.debt_to_equity, 2) }}</span>{{ m.health_badge(fr.debt_to_equity) }}</dd>
+      </div>
+      <div class="flex items-center justify-between border-b border-slate-800 pb-1.5">
+        <dt class="text-slate-400">Profit margin</dt>
+        <dd class="flex items-center gap-2"><span class="tabular-nums">{{ m.pct((f.profit_margin * 100) if f.profit_margin is not none else None) }}</span>{{ m.health_badge(fr.profit_margin) }}</dd>
+      </div>
+      <div class="flex items-center justify-between border-b border-slate-800 pb-1.5">
+        <dt class="text-slate-400">Revenue growth (YoY)</dt>
+        <dd class="flex items-center gap-2"><span class="tabular-nums">{{ m.pct((f.revenue_growth * 100) if f.revenue_growth is not none else None) }}</span>{{ m.health_badge(fr.revenue_growth) }}</dd>
+      </div>
+      <div class="flex items-center justify-between border-b border-slate-800 pb-1.5">
+        <dt class="text-slate-400">Earnings growth (YoY)</dt>
+        <dd class="flex items-center gap-2"><span class="tabular-nums">{{ m.pct((f.earnings_growth * 100) if f.earnings_growth is not none else None) }}</span>{{ m.health_badge(fr.earnings_growth) }}</dd>
+      </div>
+      <div class="flex items-center justify-between border-b border-slate-800 pb-1.5">
+        <dt class="text-slate-400">Dividend yield</dt>
+        <dd class="tabular-nums">{{ m.pct((f.dividend_yield * 100) if f.dividend_yield is not none else None) }}</dd>
+      </div>
+      <div class="flex items-center justify-between">
+        <dt class="text-slate-400">Market cap</dt>
+        <dd class="tabular-nums">{% if f.market_cap %}&#8377;{{ "{:,.0f}".format((f.market_cap / 10000000)|round(0)) }} Cr{% else %}<span class="text-slate-500">&mdash;</span>{% endif %}</dd>
+      </div>
+    </dl>
+    <p class="text-xs text-slate-500 mt-3">
+      Source: {{ f.source|replace("yfinance_", "yfinance ") }} &middot; as of {{ f.as_of_date }}.
+      Free data &mdash; treat as indicative, not audited.
+    </p>
+    {% else %}
+    <p class="text-slate-500 text-sm">No fundamentals ingested for this symbol yet.</p>
+    {% endif %}
+  </div>
+</div>
+
+<p class="text-xs text-slate-600 mt-6 leading-relaxed">
+  Analytical / educational view only &mdash; <b>not investment advice</b>. This is a long-only paper-trading
+  research system: "SELL" means exit or avoid, never a short. Model outputs can be wrong, especially in market
+  conditions not seen during training. For real capital-allocation decisions, consult a SEBI-registered advisor.
+</p>
+
+<script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
+<script src="/static/stock-chart.js"></script>
+<script src="/static/live-price.js"></script>
+{% endblock %}

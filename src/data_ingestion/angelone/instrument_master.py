@@ -32,10 +32,10 @@ from src.utils.secrets import project_root
 
 log = get_logger("angelone.instruments")
 
-# Angel One's public instrument master. Updated daily by Angel.
+# Angel One's public instrument master. Updated daily ~8:30 AM IST.
 _MASTER_URL = (
     "https://margincalculator.angelbroking.com/OpenAPI_File/files/"
-    "OpenAPI_AngelOne_complete.json"
+    "OpenAPIScripMaster.json"
 )
 
 # Per Angel One docs and observed behaviour, NSE cash-equity rows look like:

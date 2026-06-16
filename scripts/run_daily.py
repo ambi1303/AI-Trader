@@ -4,12 +4,13 @@ Order of operations (each step is fault-isolated -- a failure logs to
 ``validation_failures`` and continues with the next step):
 
     1. Apply schema migrations           [src.db.migrate.apply_schema]
-    2. Ingest latest yfinance bars       [scripts.ingest_yfinance]   *optional*
-    3. Build features for today          [scripts.build_features]    *optional*
-    4. Predict for the universe          [src.models.predict]
-    5. Generate signal_outbox rows       [src.signals.generator]
-    6. Reconcile paper trades            [src.paper.reconcile]
-    7. Send the daily notification       [src.notifications.dispatcher]
+    2. Ingest latest yfinance bars       [scripts.ingest_yfinance]    *optional*
+    3. Refresh fundamentals snapshot     [scripts.ingest_fundamentals] *optional*
+    4. Build features for today          [scripts.build_features]     *optional*
+    5. Predict for the universe          [src.models.predict]
+    6. Generate signal_outbox rows       [src.signals.generator]
+    7. Reconcile paper trades            [src.paper.reconcile]
+    8. Send the daily notification       [src.notifications.dispatcher]
 
 Each step writes a ``validation_failures`` row on error and the final report
 shows the count under the Health-check section. The script's exit code is
@@ -172,6 +173,22 @@ def _step_ingest_angelone(symbols: list[str] | None) -> dict[str, Any]:
     return {"return_code": rc, "skipped": rc == 2}     # rc=2 == no creds
 
 
+def _step_fundamentals(symbols: list[str] | None) -> dict[str, Any]:
+    """Refresh the current fundamentals snapshot (P/E, ROE, D/E, ...).
+
+    Snapshot-only by default: quarterly history reconstruction is only
+    needed at retrain time, so the daily run just refreshes the latest
+    point so the as-of join in feature_builder stays current. Best-effort
+    -- yfinance network/404 failures are non-fatal.
+    """
+    from scripts.ingest_fundamentals import main as fundamentals_main
+    argv: list[str] = ["--no-reconstruct"]
+    if symbols:
+        argv += ["--symbols", ",".join(symbols)]
+    rc = fundamentals_main(argv)
+    return {"return_code": rc, "skipped": rc == 2}     # rc=2 == no symbols
+
+
 def _step_features(symbols: list[str] | None) -> dict[str, Any]:
     from scripts.build_features import main as features_main
     argv: list[str] = []
@@ -243,8 +260,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--skip-ingest", action="store_true",
                    help="Skip yfinance ingestion (useful when offline).")
     p.add_argument("--use-angelone", action="store_true",
-                   help="Also pull EOD bars from Angel One SmartAPI "
-                        "(requires ANGEL_* env vars; data-only / no orders).")
+                   help="(Deprecated/no-op) Angel One now runs by default; "
+                        "kept for backward compatibility.")
+    p.add_argument("--skip-angelone", action="store_true",
+                   help="Skip Angel One SmartAPI EOD ingestion. By default it "
+                        "runs first (preferred price source) and self-skips "
+                        "if ANGEL_* env vars are missing; data-only / no orders.")
+    p.add_argument("--skip-fundamentals", action="store_true",
+                   help="Skip the fundamentals snapshot refresh.")
     p.add_argument("--skip-features", action="store_true",
                    help="Skip feature rebuild (use latest persisted features).")
     p.add_argument("--skip-predict", action="store_true",
@@ -284,11 +307,17 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # Steps 2..6 are fault-isolated.
+    # Angel One first: preferred (freshest, official NSE) price source that the
+    # dashboard reads ahead of yfinance. Self-skips if ANGEL_* creds are absent.
+    if not args.skip_angelone:
+        _run_step("ingest_angelone", lambda: _step_ingest_angelone(syms),
+                  run_id=run_id, result=result)
+    # yfinance second: gap-filler / fallback for symbols Angel One can't map.
     if not args.skip_ingest:
         _run_step("ingest_yfinance", lambda: _step_ingest(syms),
                   run_id=run_id, result=result)
-    if args.use_angelone and not args.skip_ingest:
-        _run_step("ingest_angelone", lambda: _step_ingest_angelone(syms),
+    if not args.skip_fundamentals:
+        _run_step("ingest_fundamentals", lambda: _step_fundamentals(syms),
                   run_id=run_id, result=result)
     if not args.skip_features:
         _run_step("build_features", lambda: _step_features(syms),

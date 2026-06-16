@@ -185,3 +185,65 @@ def _first_mismatch(a: list[str] | None, b: list[str]) -> int:
         if x != y:
             return i
     return min(len(a), len(b))
+
+
+class DeterministicXGBMulticlass(BaseEstimator, ClassifierMixin):
+    """Deterministic multiclass (softprob) XGBoost for the SELL/HOLD/BUY head.
+
+    Same determinism guarantees as :class:`DeterministicXGBClassifier` plus
+    a pinned ``num_class``. We expose the sklearn classifier contract so the
+    isotonic calibrator (one-vs-rest) can wrap it.
+    """
+
+    def __init__(
+        self,
+        params: XGBParams | None = None,
+        *,
+        num_class: int = 3,
+    ) -> None:
+        self.params = params or XGBParams()
+        self.num_class = num_class
+        self._model: xgb.XGBClassifier | None = None
+        self._feature_names: list[str] | None = None
+        self.classes_: np.ndarray = np.arange(num_class)
+
+    def fit(
+        self, X: pd.DataFrame, y: pd.Series | np.ndarray
+    ) -> "DeterministicXGBMulticlass":
+        if not isinstance(X, pd.DataFrame):
+            raise TypeError("X must be a pandas DataFrame so we can pin column order")
+        y_arr = np.asarray(y).astype(int)
+        kwargs = self.params.to_xgb_kwargs()
+        # Override the binary objective with multiclass softprob.
+        kwargs.update(
+            objective="multi:softprob",
+            num_class=self.num_class,
+            eval_metric="mlogloss",
+        )
+        kwargs.pop("scale_pos_weight", None)  # not valid for multiclass
+        self._model = xgb.XGBClassifier(**kwargs)
+        self._feature_names = list(X.columns)
+        self._model.fit(X.values, y_arr)
+        self.classes_ = self._model.classes_
+        return self
+
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        if self._model is None:
+            raise RuntimeError("Model not fit yet")
+        if not isinstance(X, pd.DataFrame):
+            raise TypeError("X must be a pandas DataFrame")
+        if list(X.columns) != self._feature_names:
+            raise ValueError(
+                "Feature column drift: trained on "
+                f"{len(self._feature_names or [])} cols, got {len(X.columns)}"
+            )
+        return self._model.predict_proba(X.values)
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        return self.predict_proba(X).argmax(axis=1)
+
+    @property
+    def feature_names(self) -> list[str]:
+        if self._feature_names is None:
+            raise RuntimeError("Model not fit yet")
+        return list(self._feature_names)

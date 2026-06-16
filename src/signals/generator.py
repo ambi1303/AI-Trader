@@ -363,6 +363,82 @@ def generate_signals(
     return kept
 
 
+def generate_exit_signals(
+    *,
+    signal_date: str | None = None,
+    run_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Queue EXIT signals for open positions the model now flags SELL.
+
+    This is the SELL half of the "complete buy/sell indication". The system
+    is long-only (Indian retail delivery can't short), so a SELL verdict on
+    a name we *hold* means "get out", not "go short". We write a side='EXIT'
+    row into ``signal_outbox`` for each held name whose latest verdict is
+    SELL; the paper reconciler closes the position with reason ``model_sell``.
+
+    Idempotent: re-running the same day is a no-op (one EXIT per
+    symbol/date).
+    """
+    sd = signal_date or date.today().isoformat()
+    rid = run_id or _latest_run_id()
+    if rid is None:
+        return []
+
+    open_pos = fetch_all(
+        "SELECT symbol, qty FROM paper_trades WHERE status = 'open'"
+    )
+    if not open_pos:
+        return []
+
+    out: list[dict[str, Any]] = []
+    with transaction() as conn:
+        for p in open_pos:
+            sym = p["symbol"]
+            v = fetch_one(
+                """
+                SELECT verdict, prob_sell, target_price, stop_price
+                FROM   predictions_log
+                WHERE  symbol = ? AND run_id = ? AND prediction_date <= ?
+                       AND verdict IS NOT NULL
+                ORDER  BY prediction_date DESC LIMIT 1
+                """,
+                (sym, rid, sd),
+            )
+            if not v or v["verdict"] != "SELL":
+                continue
+            exists = conn.execute(
+                "SELECT 1 FROM signal_outbox WHERE symbol = ? AND signal_date = ? "
+                "AND side = 'EXIT'",
+                (sym, sd),
+            ).fetchone()
+            if exists:
+                continue
+            payload = {
+                "verdict": "SELL",
+                "prob_sell": v["prob_sell"],
+                "target_price": v["target_price"],
+                "stop_price": v["stop_price"],
+                "model_run_id": rid,
+            }
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO signal_outbox
+                    (symbol, signal_date, side, qty, confidence, status,
+                     payload_json)
+                VALUES (?, ?, 'EXIT', ?, ?, 'pending', ?)
+                """,
+                (sym, sd, int(p["qty"] or 0),
+                 float(v["prob_sell"]) if v["prob_sell"] is not None else None,
+                 json.dumps(payload, default=str)),
+            )
+            if cur.rowcount == 0:
+                continue
+            out.append({"symbol": sym, "side": "EXIT", "qty": p["qty"]})
+
+    log.info("Exit-signal generation | date={} | exits_queued={}", sd, len(out))
+    return out
+
+
 def list_pending(signal_date: str | None = None) -> list[dict[str, Any]]:
     """Return pending signals for ``signal_date`` (defaults to today)."""
     sd = signal_date or date.today().isoformat()

@@ -58,6 +58,11 @@ _CROSS_SECTIONAL_BASE = (
     "bb_pct_b",
     "sector_rs_20d",
     "adx_14",
+    # Fundamentals: peer-relative valuation / quality / size / growth. These
+    # only carry signal *cross-sectionally* (a P/E of 25 is cheap for IT,
+    # rich for a bank), so the rank companion is what the model leans on.
+    "pe_ttm", "pb", "roe", "debt_to_equity", "profit_margin",
+    "earnings_growth", "log_market_cap",
 )
 
 
@@ -90,13 +95,56 @@ def add_cross_sectional_features(
     return df, xs_cols
 
 
+# Tri-class verdict encoding. Kept here so training, calibration, prediction
+# and the UI all agree on the integer<->label mapping.
+TRICLASS_LABELS = ("SELL", "HOLD", "BUY")
+TRICLASS_SELL, TRICLASS_HOLD, TRICLASS_BUY = 0, 1, 2
+
+
 @dataclass
 class TrainingMatrix:
     X: pd.DataFrame
-    y: pd.Series
-    forward_return: pd.Series  # the actual next-day return (for utility calcs)
+    y: pd.Series                # binary "up" label (legacy, drives BUY signals)
+    forward_return: pd.Series   # the actual forward return over the horizon
     meta: pd.DataFrame  # symbol, feature_date — used for time-based splitting
     feature_columns: list[str] = field(default_factory=list)
+    # Tri-class verdict label (0=SELL, 1=HOLD, 2=BUY) and the raw forward
+    # return regression target. Populated by build_training_matrix so the
+    # trainer can fit the auxiliary verdict + price-target heads on the exact
+    # same rows/splits as the binary model.
+    y_triclass: pd.Series = field(default_factory=lambda: pd.Series(dtype=int))
+    y_return: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
+
+
+def make_triclass_labels(
+    df: pd.DataFrame,
+    *,
+    return_col: str = "fwd_return",
+    date_col: str = "feature_date",
+    mode: str = "cross_sectional",
+    buy_threshold: float = 0.03,
+    sell_threshold: float = -0.03,
+) -> pd.Series:
+    """Bucket the forward return into SELL / HOLD / BUY.
+
+    mode="cross_sectional" (default): per-day terciles of the forward
+        return. Bottom third -> SELL, top third -> BUY, middle -> HOLD. This
+        is balanced (~33% each) and learns *relative* strength, matching the
+        framing where this system found its edge.
+    mode="absolute": fixed bands. return > buy_threshold -> BUY,
+        return < sell_threshold -> SELL, else HOLD.
+    """
+    if mode == "absolute":
+        out = pd.Series(TRICLASS_HOLD, index=df.index, dtype=int)
+        out[df[return_col] > buy_threshold] = TRICLASS_BUY
+        out[df[return_col] < sell_threshold] = TRICLASS_SELL
+        return out
+    # cross_sectional terciles
+    pct = df.groupby(date_col)[return_col].rank(pct=True, method="average")
+    out = pd.Series(TRICLASS_HOLD, index=df.index, dtype=int)
+    out[pct <= (1.0 / 3.0)] = TRICLASS_SELL
+    out[pct >= (2.0 / 3.0)] = TRICLASS_BUY
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +222,9 @@ def build_training_matrix(
     cross_sectional_features: bool = False,
     drop_warmup: bool = False,
     min_non_nan_features: int | None = None,
+    triclass_mode: str = "cross_sectional",
+    triclass_buy: float = 0.03,
+    triclass_sell: float = -0.03,
 ) -> TrainingMatrix:
     """Build the training matrix.
 
@@ -281,18 +332,33 @@ def build_training_matrix(
     else:
         y = (df["fwd_return"] > target_return_threshold).astype(int)
     fwd_ret = df["fwd_return"].astype(float)
+
+    # Auxiliary targets for the verdict + price-target heads, computed on the
+    # exact same rows so splits line up with the binary model.
+    y_tri = make_triclass_labels(
+        df, mode=triclass_mode,
+        buy_threshold=triclass_buy, sell_threshold=triclass_sell,
+    )
+    y_ret = fwd_ret.copy()
+
     meta = df[["symbol", "feature_date"]].copy()
     X = df[feature_cols].copy()
 
     log.info(
-        "Built matrix: {} rows, {} features, label_mode={}, positive_rate={:.3f}",
+        "Built matrix: {} rows, {} features, label_mode={}, positive_rate={:.3f}, "
+        "triclass_mode={} (sell/hold/buy = {}/{}/{})",
         len(X),
         len(feature_cols),
         label_mode,
         y.mean() if len(y) else 0.0,
+        triclass_mode,
+        int((y_tri == TRICLASS_SELL).sum()),
+        int((y_tri == TRICLASS_HOLD).sum()),
+        int((y_tri == TRICLASS_BUY).sum()),
     )
     return TrainingMatrix(
-        X=X, y=y, forward_return=fwd_ret, meta=meta, feature_columns=feature_cols
+        X=X, y=y, forward_return=fwd_ret, meta=meta,
+        feature_columns=feature_cols, y_triclass=y_tri, y_return=y_ret,
     )
 
 

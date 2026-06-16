@@ -22,8 +22,20 @@ from typing import Any
 
 from src.utils.db import fetch_all, fetch_one
 from src.utils.logger import get_logger
+from src.web import assess
 
 log = get_logger("web.queries")
+
+# Price sources the UI may read, in *preference* order when several carry the
+# same date. Angel One is the broker's official feed (freshest, most accurate
+# for NSE), then NSE BhavCopy (official EOD), then yfinance (third-party gap
+# filler). This ordering is applied via _SRC_RANK_SQL in the price queries.
+_PRICE_SOURCES = ("angelone", "bhavcopy", "yfinance")
+_PRICE_SOURCES_IN = "('angelone','bhavcopy','yfinance')"
+# Lower rank wins on a tie (same bar_date, multiple sources).
+_SRC_RANK_SQL = (
+    "CASE source WHEN 'angelone' THEN 0 WHEN 'bhavcopy' THEN 1 ELSE 2 END"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +105,14 @@ class CandidateRow:
     threshold: float | None
     distance_to_threshold: float | None   # calibrated - threshold (neg = below)
     would_fire: bool
+    # Enriched verdict / price-target / fundamentals (schema v5). All
+    # optional so legacy predictions still render.
+    verdict: str | None = None
+    target_price: float | None = None
+    upside_pct: float | None = None        # predicted forward return, %
+    pe_ttm: float | None = None
+    roe: float | None = None
+    marginal: bool = False                 # predicted move < round-trip cost band
 
 
 @dataclass(frozen=True)
@@ -130,6 +150,7 @@ class DashboardSnapshot:
     universe_size: int = 0
     candidates: list[CandidateRow] = field(default_factory=list)
     threshold: float | None = None
+    round_trip_cost_pct: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         out = asdict(self)
@@ -269,9 +290,21 @@ def get_top_candidates(
     rows = _safe_fetch(
         """
         SELECT p.symbol, p.prediction_date, p.raw_prob, p.calibrated_prob,
-               ss.sector AS sector
+               p.verdict, p.target_price, p.predicted_return,
+               ss.sector AS sector,
+               f.pe_ttm AS pe_ttm, f.roe AS roe
         FROM   predictions_log p
         LEFT   JOIN stock_sectors ss ON ss.symbol = p.symbol
+        LEFT   JOIN (
+                 SELECT fd.symbol, fd.pe_ttm, fd.roe
+                 FROM   fundamental_data fd
+                 WHERE  fd.source = 'yfinance_snapshot'
+                   AND  fd.as_of_date = (
+                          SELECT MAX(fd2.as_of_date) FROM fundamental_data fd2
+                          WHERE  fd2.symbol = fd.symbol
+                            AND  fd2.source = 'yfinance_snapshot'
+                        )
+               ) f ON f.symbol = p.symbol
         WHERE  p.prediction_date = ?
           AND  p.run_id = (
                  SELECT run_id FROM predictions_log
@@ -287,6 +320,7 @@ def get_top_candidates(
     for r in rows:
         cal = float(r["calibrated_prob"] or 0.0)
         dist = (cal - threshold) if threshold is not None else None
+        pred_ret = r.get("predicted_return")
         out.append(CandidateRow(
             symbol=r["symbol"],
             prediction_date=r["prediction_date"],
@@ -296,6 +330,15 @@ def get_top_candidates(
             threshold=threshold,
             distance_to_threshold=dist,
             would_fire=(threshold is not None and cal >= threshold),
+            verdict=r.get("verdict"),
+            target_price=(None if r.get("target_price") is None
+                          else float(r["target_price"])),
+            upside_pct=(None if pred_ret is None else float(pred_ret) * 100.0),
+            pe_ttm=(None if r.get("pe_ttm") is None else float(r["pe_ttm"])),
+            roe=(None if r.get("roe") is None else float(r["roe"])),
+            marginal=assess.is_marginal_move(
+                None if pred_ret is None else float(pred_ret) * 100.0
+            ),
         ))
     return out
 
@@ -316,7 +359,8 @@ def get_open_positions(as_of: str | None = None) -> list[OpenPositionRow]:
         sym = r["symbol"]
         last = _safe_fetch_one(
             "SELECT close FROM price_data WHERE symbol = ? AND bar_date <= ? "
-            "AND source = 'yfinance' ORDER BY bar_date DESC LIMIT 1",
+            f"AND source IN {_PRICE_SOURCES_IN} "
+            f"ORDER BY bar_date DESC, {_SRC_RANK_SQL} LIMIT 1",
             (sym, today),
         )
         last_close = float(last["close"]) if last and last.get("close") is not None else None
@@ -379,7 +423,7 @@ def get_recent_closed(window_days: int = 30, limit: int = 50) -> list[ClosedTrad
 def get_freshness(as_of: str | None = None) -> FreshnessRow:
     today = as_of or date.today().isoformat()
     p = _safe_fetch_one(
-        "SELECT MAX(bar_date) AS d FROM price_data WHERE source = 'yfinance'"
+        f"SELECT MAX(bar_date) AS d FROM price_data WHERE source IN {_PRICE_SOURCES_IN}"
     )
     f = _safe_fetch_one("SELECT MAX(feature_date) AS d FROM feature_data")
     pr = _safe_fetch_one("SELECT MAX(prediction_date) AS d FROM predictions_log")
@@ -471,7 +515,212 @@ def build_dashboard_snapshot(as_of: str | None = None) -> DashboardSnapshot:
         universe_size=get_universe_size(),
         candidates=candidates,
         threshold=threshold,
+        round_trip_cost_pct=assess.round_trip_cost_pct(),
     )
+
+
+_FUNDAMENTAL_FIELDS = (
+    "pe_ttm", "pb", "roe", "debt_to_equity", "profit_margin",
+    "revenue_growth", "earnings_growth", "dividend_yield", "market_cap",
+)
+
+
+def get_latest_prediction(symbol: str) -> dict[str, Any] | None:
+    """Most recent enriched prediction (verdict/target/probs) for a symbol.
+
+    Pinned to the most-recently-inserted run for that symbol's latest
+    prediction_date so a retrain doesn't blend stale rows.
+    """
+    return _safe_fetch_one(
+        """
+        SELECT symbol, prediction_date, raw_prob, calibrated_prob, verdict,
+               prob_buy, prob_hold, prob_sell, predicted_return, target_price,
+               stop_price, run_id
+        FROM   predictions_log
+        WHERE  symbol = ?
+        ORDER  BY prediction_date DESC, id DESC
+        LIMIT  1
+        """,
+        (symbol,),
+    )
+
+
+def get_latest_fundamentals(symbol: str) -> dict[str, Any] | None:
+    """Latest fundamental snapshot for a symbol (live snapshot preferred)."""
+    row = _safe_fetch_one(
+        """
+        SELECT symbol, as_of_date, source, pe_ttm, pb, roe, debt_to_equity,
+               profit_margin, revenue_growth, earnings_growth, dividend_yield,
+               market_cap, eps_ttm, book_value
+        FROM   fundamental_data
+        WHERE  symbol = ?
+        ORDER  BY (source = 'yfinance_snapshot') DESC, as_of_date DESC
+        LIMIT  1
+        """,
+        (symbol,),
+    )
+    return row
+
+
+def get_stock_detail(symbol: str, as_of: str | None = None) -> dict[str, Any]:
+    """Everything the per-stock detail page needs in one bundle."""
+    today = as_of or date.today().isoformat()
+    sym = symbol.upper()
+
+    last = _safe_fetch_one(
+        "SELECT close, bar_date FROM price_data WHERE symbol = ? AND bar_date <= ? "
+        f"AND source IN {_PRICE_SOURCES_IN} "
+        f"ORDER BY bar_date DESC, {_SRC_RANK_SQL} LIMIT 1",
+        (sym, today),
+    )
+    last_close = float(last["close"]) if last and last.get("close") is not None else None
+
+    sector_row = _safe_fetch_one(
+        "SELECT sector FROM stock_sectors WHERE symbol = ?", (sym,)
+    )
+    sector = (sector_row or {}).get("sector") or "UNKNOWN"
+
+    pred = get_latest_prediction(sym)
+    fundamentals = get_latest_fundamentals(sym)
+    model = get_latest_model()
+
+    target_price = (pred or {}).get("target_price")
+    upside_pct = None
+    if target_price is not None and last_close:
+        upside_pct = (float(target_price) / last_close - 1.0) * 100.0
+
+    # Is the name currently held? (drives the SELL=exit framing in the UI)
+    held = _safe_fetch_one(
+        "SELECT id, entry_price, qty, entry_date FROM paper_trades "
+        "WHERE symbol = ? AND status = 'open' ORDER BY id DESC LIMIT 1",
+        (sym,),
+    )
+
+    detail = {
+        "symbol": sym,
+        "sector": sector,
+        "last_close": last_close,
+        "as_of": (last or {}).get("bar_date"),
+        "prediction": pred,
+        "fundamentals": fundamentals,
+        "upside_pct": upside_pct,
+        "model": model,
+        "held": held,
+    }
+
+    # ---- Presentation interpretation (plain-language layer) --------------
+    fund_age = assess.staleness_days(
+        (fundamentals or {}).get("as_of_date"), today=today
+    )
+    detail["fundamentals_age_days"] = fund_age
+    detail["fundamentals_staleness"] = assess.rate_staleness(fund_age)
+    detail["fundamental_ratings"] = assess.fundamental_ratings(fundamentals)
+    detail["summary"] = assess.verdict_summary(detail)
+    detail["round_trip_cost_pct"] = assess.round_trip_cost_pct()
+    detail["is_marginal"] = assess.is_marginal_move(upside_pct)
+    return detail
+
+
+def get_ohlc(symbol: str, limit: int = 260) -> dict[str, Any]:
+    """OHLCV + overlay indicators for the candlestick chart.
+
+    OHLC comes from ``price_data`` (BhavCopy preferred, yfinance to fill the
+    most recent gap, mirroring the feature builder); EMA/RSI/MACD overlays
+    come from ``feature_data`` joined by date. Shaped for lightweight-charts
+    (``time`` = 'YYYY-MM-DD').
+    """
+    sym = symbol.upper()
+    bars = _safe_fetch(
+        """
+        SELECT bar_date, open, high, low, close, volume, source
+        FROM   price_data
+        WHERE  symbol = ? AND source IN {sources}
+        ORDER  BY bar_date
+        """.format(sources=_PRICE_SOURCES_IN),
+        (sym,),
+    )
+    # Dedup by date, keeping the most-preferred source (angelone > bhavcopy >
+    # yfinance) so the freshest/official close wins when sources overlap.
+    _rank = {s: i for i, s in enumerate(_PRICE_SOURCES)}
+    by_date: dict[str, dict[str, Any]] = {}
+    for r in bars:
+        d = r["bar_date"]
+        cur = by_date.get(d)
+        if cur is None or _rank.get(r["source"], 99) < _rank.get(cur["source"], 99):
+            by_date[d] = r
+    dates = sorted(by_date.keys())[-int(limit):]
+
+    feats = _safe_fetch(
+        """
+        SELECT feature_date, ema_20, ema_50, ema_200, rsi_14,
+               macd, macd_signal, macd_hist
+        FROM   feature_data
+        WHERE  symbol = ?
+        ORDER  BY feature_date
+        """,
+        (sym,),
+    )
+    feat_by_date = {r["feature_date"]: r for r in feats}
+
+    def _f(v):
+        return None if v is None else float(v)
+
+    candles, volume = [], []
+    ema20, ema50, ema200, rsi, macd, macd_sig, macd_hist = ([] for _ in range(7))
+    for d in dates:
+        b = by_date[d]
+        o, h, low, c = _f(b["open"]), _f(b["high"]), _f(b["low"]), _f(b["close"])
+        if None in (o, h, low, c):
+            continue
+        candles.append({"time": d, "open": o, "high": h, "low": low, "close": c})
+        volume.append({
+            "time": d, "value": float(b["volume"] or 0),
+            "color": "rgba(34,197,94,0.4)" if c >= o else "rgba(239,68,68,0.4)",
+        })
+        ft = feat_by_date.get(d)
+        if ft:
+            if ft["ema_20"] is not None:
+                ema20.append({"time": d, "value": _f(ft["ema_20"])})
+            if ft["ema_50"] is not None:
+                ema50.append({"time": d, "value": _f(ft["ema_50"])})
+            if ft["ema_200"] is not None:
+                ema200.append({"time": d, "value": _f(ft["ema_200"])})
+            if ft["rsi_14"] is not None:
+                rsi.append({"time": d, "value": _f(ft["rsi_14"])})
+            if ft["macd"] is not None:
+                macd.append({"time": d, "value": _f(ft["macd"])})
+            if ft["macd_signal"] is not None:
+                macd_sig.append({"time": d, "value": _f(ft["macd_signal"])})
+            if ft["macd_hist"] is not None:
+                macd_hist.append({
+                    "time": d, "value": _f(ft["macd_hist"]),
+                    "color": "rgba(34,197,94,0.5)" if (ft["macd_hist"] or 0) >= 0
+                    else "rgba(239,68,68,0.5)",
+                })
+
+    pred = get_latest_prediction(sym)
+    levels = {}
+    if pred:
+        if pred.get("target_price") is not None:
+            levels["target"] = float(pred["target_price"])
+        if pred.get("stop_price") is not None:
+            levels["stop"] = float(pred["stop_price"])
+    if candles:
+        levels["last"] = candles[-1]["close"]
+
+    return {
+        "symbol": sym,
+        "candles": candles,
+        "volume": volume,
+        "ema20": ema20,
+        "ema50": ema50,
+        "ema200": ema200,
+        "rsi": rsi,
+        "macd": macd,
+        "macd_signal": macd_sig,
+        "macd_hist": macd_hist,
+        "levels": levels,
+    }
 
 
 # Useful for /healthz JSON without doing the full snapshot.

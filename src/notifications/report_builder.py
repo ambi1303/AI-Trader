@@ -18,10 +18,12 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from src.utils.db import fetch_all, fetch_one
 from src.utils.logger import get_logger
+from src.utils.secrets import project_root
 
 log = get_logger("notifications.report_builder")
 
@@ -131,6 +133,24 @@ class PaperPortfolio:
 
 
 @dataclass(frozen=True)
+class WalkForwardSummary:
+    """Aggregate out-of-sample metrics from the most recent walk-forward eval.
+
+    Walk-forward = train on the past, test on the *next* unseen window, roll
+    forward. This is a far more honest read on "does the model work?" than a
+    single 70/15/15 split, which can get lucky on one regime. We surface it
+    when ``scripts.walk_forward_eval --save`` has been run; otherwise None.
+    """
+    generated_at: str | None
+    folds_completed: int
+    n_predictions: int
+    auc: float | None             # calibrated, out-of-sample
+    brier: float | None
+    mean_threshold: float | None
+    source_file: str | None
+
+
+@dataclass(frozen=True)
 class DataFreshness:
     latest_price_date: str | None
     latest_feature_date: str | None
@@ -154,6 +174,7 @@ class DailyReport:
     validation: ValidationSummary
     paper: PaperPortfolio
     freshness: DataFreshness
+    walk_forward: WalkForwardSummary | None = None
 
     # Derived/quick-glance fields used for the WhatsApp short summary.
     top_n: int = field(default=0)
@@ -407,13 +428,29 @@ def _load_validation_summary(*, window_days: int = 7) -> ValidationSummary:
     )
 
 
+# Price sources the report may read, in preference order on a date tie:
+# Angel One (broker feed, freshest/most accurate for NSE) > BhavCopy
+# (official EOD) > yfinance (third-party gap filler). This MUST match the
+# dashboard's ordering in src/web/queries.py so the report and the web UI
+# never disagree on "last price".
+_PRICE_SOURCES_IN = "('angelone','bhavcopy','yfinance')"
+_SRC_RANK_SQL = (
+    "CASE source WHEN 'angelone' THEN 0 WHEN 'bhavcopy' THEN 1 ELSE 2 END"
+)
+
+
 def _last_close_for(symbol: str, on_date: str) -> float | None:
-    """Latest yfinance close <= ``on_date`` (used for marking open positions)."""
+    """Latest close <= ``on_date`` for marking open positions.
+
+    Reads across all price sources and prefers Angel One, then BhavCopy,
+    then yfinance on the same bar_date (see _SRC_RANK_SQL).
+    """
     row = fetch_one(
-        """
+        f"""
         SELECT close FROM price_data
-        WHERE  symbol = ? AND bar_date <= ? AND source = 'yfinance'
-        ORDER  BY bar_date DESC LIMIT 1
+        WHERE  symbol = ? AND bar_date <= ? AND source IN {_PRICE_SOURCES_IN}
+        ORDER  BY bar_date DESC, {_SRC_RANK_SQL}
+        LIMIT 1
         """,
         (symbol, on_date),
     )
@@ -522,27 +559,80 @@ def _load_paper_portfolio(report_date: str, *, window_days: int = 30,
 def _load_data_freshness(report_date: str) -> DataFreshness:
     """Latest dates seen across price/feature/prediction tables."""
     p = fetch_one(
-        "SELECT MAX(bar_date) AS d FROM price_data WHERE source = 'yfinance'"
+        f"SELECT MAX(bar_date) AS d FROM price_data WHERE source IN {_PRICE_SOURCES_IN}"
     )
     f = fetch_one("SELECT MAX(feature_date) AS d FROM feature_data")
     pr = fetch_one("SELECT MAX(prediction_date) AS d FROM predictions_log")
     latest_price = p["d"] if p else None
     days_since: int | None = None
+    is_stale = False
     if latest_price:
         try:
-            days_since = (
-                date.fromisoformat(report_date)
-                - date.fromisoformat(latest_price)
-            ).days
-        except ValueError:
-            days_since = None
+            last = date.fromisoformat(latest_price)
+            ref = date.fromisoformat(report_date)
+            days_since = (ref - last).days
+            # Staleness is measured in TRADING days, not calendar days, so a
+            # weekend or NSE holiday gap never reads as "stale". We count the
+            # trading sessions strictly after the last bar up to the report
+            # date; a gap of <=1 (just today's not-yet-ingested session) is OK.
+            from src.data_validation import calendar_check
+            trading_gap = sum(
+                1 for d in calendar_check.trading_days_between(last, ref)
+                if d > last
+            )
+            is_stale = trading_gap > 1
+        except Exception:  # noqa: BLE001 -- never crash the report on a date quirk
+            pass
     return DataFreshness(
         latest_price_date=latest_price,
         latest_feature_date=f["d"] if f else None,
         latest_prediction_date=pr["d"] if pr else None,
         days_since_last_price=days_since,
-        # 3 calendar days covers a long weekend; longer is "stale".
-        is_stale=(days_since is not None and days_since > 3),
+        is_stale=is_stale,
+    )
+
+
+def _as_float(value: Any) -> float | None:
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_latest_walk_forward() -> WalkForwardSummary | None:
+    """Read the newest data/reports/wf_meta_*.json, if any.
+
+    Walk-forward results are produced by ``scripts.walk_forward_eval --save``
+    (a periodic research step, NOT the daily run because it's expensive).
+    The report surfaces the latest saved aggregate as the trustworthy
+    out-of-sample model-health read; absent that, returns None.
+    """
+    reports_dir = project_root() / "data" / "reports"
+    if not reports_dir.exists():
+        return None
+    metas = sorted(reports_dir.glob("wf_meta_*.json"),
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    if not metas:
+        return None
+    newest = metas[0]
+    try:
+        agg = json.loads(newest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("Could not read walk-forward meta {}: {}", newest.name, exc)
+        return None
+    if int(agg.get("folds_completed", 0) or 0) <= 0:
+        return None
+    cal = agg.get("calibrated") or {}
+    # Filename stamp wf_meta_YYYYMMDDTHHMMSSZ.json -> readable; fall back to mtime.
+    stamp = newest.stem.replace("wf_meta_", "")
+    return WalkForwardSummary(
+        generated_at=stamp or None,
+        folds_completed=int(agg.get("folds_completed", 0) or 0),
+        n_predictions=int(agg.get("n_test_predictions", 0) or 0),
+        auc=_as_float(cal.get("auc") or cal.get("roc_auc")),
+        brier=_as_float(cal.get("brier") or cal.get("brier_score")),
+        mean_threshold=_as_float(agg.get("mean_threshold")),
+        source_file=newest.name,
     )
 
 
@@ -586,6 +676,7 @@ def build_daily_report(
     universe_size = _load_universe_size()
     paper = _load_paper_portfolio(rd, window_days=30, recent_n=recent_trades_n)
     freshness = _load_data_freshness(rd)
+    walk_forward = _load_latest_walk_forward()
 
     return DailyReport(
         generated_at=_utc_now_iso(),
@@ -599,6 +690,7 @@ def build_daily_report(
         validation=validation,
         paper=paper,
         freshness=freshness,
+        walk_forward=walk_forward,
         top_n=top_n,
         threshold_used=threshold,
     )

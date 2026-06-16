@@ -7,7 +7,12 @@
 
   <header class="flex items-end justify-between gap-3 flex-wrap">
     <div>
-      <div class="text-xs uppercase tracking-wide text-slate-400">As of</div>
+      <div class="text-xs uppercase tracking-wide text-slate-400 flex items-center gap-2">
+        <span>As of</span>
+        <span data-market-status
+              data-base-class="inline-flex items-center gap-1 text-[11px] font-medium px-1.5 py-0.5 rounded border normal-case tracking-normal"
+              class="inline-flex items-center gap-1 text-[11px] font-medium px-1.5 py-0.5 rounded border normal-case tracking-normal bg-slate-700/40 text-slate-300 border-slate-600">Market closed</span>
+      </div>
       <h1 class="text-2xl sm:text-3xl font-semibold tracking-tight">
         {{ snap.as_of }}
         {% if snap.freshness and snap.freshness.days_since_last_price and snap.freshness.days_since_last_price > 0 %}
@@ -69,7 +74,9 @@
         <tbody class="divide-y divide-slate-800">
           {% for s in snap.signals %}
           <tr class="hover:bg-slate-800/40">
-            <td class="px-4 py-2 font-medium">{{ s.symbol }}</td>
+            <td class="px-4 py-2 font-medium">
+              <a href="/stock/{{ s.symbol }}" class="text-sky-300 hover:text-sky-200 hover:underline">{{ s.symbol }}</a>
+            </td>
             <td class="px-4 py-2 hidden sm:table-cell text-slate-400">{{ s.sector or '—' }}</td>
             <td class="px-4 py-2">{{ m.side_badge(s.side) }}</td>
             <td class="px-4 py-2 text-right tabular-nums">{{ s.qty }}</td>
@@ -106,6 +113,19 @@
       </div>
       <span class="text-xs text-slate-400">{{ snap.candidates|length }} shown</span>
     </header>
+
+    {# ---- How to read this ---- #}
+    <details class="px-4 py-2 border-b border-slate-800 text-sm">
+      <summary class="cursor-pointer text-slate-400 hover:text-slate-200 select-none">How to read this table</summary>
+      <div class="mt-2 grid sm:grid-cols-2 gap-x-6 gap-y-1.5 text-xs text-slate-400 pb-1">
+        <div><span class="text-slate-200">Verdict</span> &mdash; model's Buy / Hold / Sell call (separate from the entry signal).</div>
+        <div><span class="text-slate-200">Target &middot; Upside</span> &mdash; expected price ~1 month out and the % move to it.</div>
+        <div><span class="text-slate-200">Conviction bar</span> &mdash; calibrated "will it rise?" probability; the amber line is the action threshold.</div>
+        <div><span class="text-slate-200">P/E &middot; ROE</span> &mdash; valuation and profitability from the latest fundamentals.</div>
+        <div><span class="text-amber-300">thin</span> &mdash; predicted move is smaller than typical trading costs (~{{ "%.2f"|format(snap.round_trip_cost_pct) }}%); low conviction.</div>
+        <div><span class="text-emerald-300">FIRES</span> &mdash; conviction is above the threshold, so this would generate a BUY today.</div>
+      </div>
+    </details>
     {% if snap.candidates %}
     <div class="overflow-x-auto">
       <table class="w-full text-sm">
@@ -113,11 +133,14 @@
           <tr>
             <th class="text-left  px-4 py-2 w-8">#</th>
             <th class="text-left  px-4 py-2">Symbol</th>
-            <th class="text-left  px-4 py-2 hidden sm:table-cell">Sector</th>
-            <th class="text-left  px-4 py-2 w-1/3">Conviction</th>
-            <th class="text-right px-4 py-2 hidden sm:table-cell">Raw</th>
+            <th class="text-left  px-4 py-2">Verdict</th>
+            <th class="text-left  px-4 py-2 hidden lg:table-cell">Sector</th>
+            <th class="text-left  px-4 py-2 w-1/4 hidden sm:table-cell">Conviction</th>
+            <th class="text-right px-4 py-2">Target</th>
+            <th class="text-right px-4 py-2">Upside</th>
+            <th class="text-right px-4 py-2 hidden md:table-cell">P/E</th>
+            <th class="text-right px-4 py-2 hidden md:table-cell">ROE</th>
             <th class="text-right px-4 py-2">Calibrated</th>
-            <th class="text-right px-4 py-2">vs Thr.</th>
           </tr>
         </thead>
         <tbody class="divide-y divide-slate-800">
@@ -129,13 +152,14 @@
           <tr class="hover:bg-slate-800/40 {{ 'bg-emerald-500/5' if c.would_fire else '' }}">
             <td class="px-4 py-2 text-slate-500 tabular-nums">{{ loop.index }}</td>
             <td class="px-4 py-2 font-medium">
-              {{ c.symbol }}
+              <a href="/stock/{{ c.symbol }}" class="text-sky-300 hover:text-sky-200 hover:underline">{{ c.symbol }}</a>
               {% if c.would_fire %}
                 <span class="ml-1 align-middle text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-700 px-1.5 py-0.5 rounded">FIRES</span>
               {% endif %}
             </td>
-            <td class="px-4 py-2 hidden sm:table-cell text-slate-400">{{ c.sector or '—' }}</td>
-            <td class="px-4 py-2">
+            <td class="px-4 py-2">{{ m.verdict_badge(c.verdict) }}</td>
+            <td class="px-4 py-2 hidden lg:table-cell text-slate-400">{{ c.sector or '—' }}</td>
+            <td class="px-4 py-2 hidden sm:table-cell">
               <div class="relative h-2.5 w-full bg-slate-800 rounded">
                 <div class="absolute inset-y-0 left-0 rounded {{ 'bg-emerald-500' if c.would_fire else 'bg-sky-500/70' }}"
                      style="width: {{ "{:.1f}".format(bar_pct) }}%"></div>
@@ -145,17 +169,18 @@
                 {% endif %}
               </div>
             </td>
-            <td class="px-4 py-2 text-right tabular-nums hidden sm:table-cell text-slate-400">{{ "{:.3f}".format(c.raw_prob) }}</td>
-            <td class="px-4 py-2 text-right tabular-nums font-medium">{{ "{:.3f}".format(c.calibrated_prob) }}</td>
-            <td class="px-4 py-2 text-right tabular-nums">
-              {% if c.distance_to_threshold is none %}
-                <span class="text-slate-500">—</span>
-              {% elif c.distance_to_threshold >= 0 %}
-                <span class="text-emerald-400">+{{ "{:.3f}".format(c.distance_to_threshold) }}</span>
-              {% else %}
-                <span class="text-rose-400">{{ "{:.3f}".format(c.distance_to_threshold) }}</span>
+            <td class="px-4 py-2 text-right tabular-nums">{{ m.num(c.target_price) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums whitespace-nowrap">
+              {{ m.pct(c.upside_pct) }}
+              {% if c.marginal and c.upside_pct is not none %}
+                <span class="ml-1 align-middle text-[10px] bg-amber-500/15 text-amber-300 border border-amber-700 px-1 py-0.5 rounded" title="Predicted move is smaller than typical round-trip trading costs">thin</span>
               {% endif %}
             </td>
+            <td class="px-4 py-2 text-right tabular-nums hidden md:table-cell text-slate-300">{{ m.num(c.pe_ttm, 1) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums hidden md:table-cell text-slate-300">
+              {{ m.pct((c.roe * 100) if c.roe is not none else None) }}
+            </td>
+            <td class="px-4 py-2 text-right tabular-nums font-medium">{{ "{:.3f}".format(c.calibrated_prob) }}</td>
           </tr>
           {% endfor %}
         </tbody>
@@ -188,13 +213,18 @@
         </thead>
         <tbody class="divide-y divide-slate-800">
           {% for p in snap.open_positions %}
-          <tr class="hover:bg-slate-800/40">
-            <td class="px-4 py-2 font-medium">{{ p.symbol }}</td>
+          <tr class="hover:bg-slate-800/40"
+              data-live-symbol="{{ p.symbol }}"
+              data-entry="{{ p.entry_price }}"
+              data-qty="{{ p.qty }}">
+            <td class="px-4 py-2 font-medium">
+              <a href="/stock/{{ p.symbol }}" class="text-sky-300 hover:text-sky-200 hover:underline">{{ p.symbol }}</a>
+            </td>
             <td class="px-4 py-2 text-right tabular-nums">{{ p.qty }}</td>
             <td class="px-4 py-2 text-right tabular-nums">{{ m.num(p.entry_price) }}</td>
-            <td class="px-4 py-2 text-right tabular-nums">{{ m.num(p.last_close) }}</td>
-            <td class="px-4 py-2 text-right tabular-nums">{{ m.money(p.unrealised_pnl) }}</td>
-            <td class="px-4 py-2 text-right tabular-nums hidden sm:table-cell">{{ m.pct(p.unrealised_pnl_pct) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums"><span class="live-ltp">{{ m.num(p.last_close) }}</span></td>
+            <td class="px-4 py-2 text-right tabular-nums"><span class="live-pnl">{{ m.money(p.unrealised_pnl) }}</span></td>
+            <td class="px-4 py-2 text-right tabular-nums hidden sm:table-cell"><span class="live-pnlpct">{{ m.pct(p.unrealised_pnl_pct) }}</span></td>
             <td class="px-4 py-2 text-right tabular-nums hidden md:table-cell">{{ p.holding_days }}</td>
           </tr>
           {% endfor %}
@@ -231,4 +261,5 @@
   </section>
 
 </section>
+<script src="/static/live-price.js"></script>
 {% endblock %}

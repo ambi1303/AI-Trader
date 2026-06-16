@@ -90,9 +90,24 @@ class ModelMetadata:
     # Defaults keep older metadata.json files loadable.
     horizon: int = 1
     cross_sectional_features: bool = False
+    # Auxiliary heads (schema v5 feature work). The binary CalibratedXGB in
+    # model.joblib stays the primary artifact (so the signal/backtest path is
+    # untouched); these flags tell the predictor whether the sibling verdict
+    # and price-target models are present and how the verdict buckets were
+    # defined. Defaults keep older metadata.json files loadable.
+    task: str = "binary"                      # binary | binary+triclass+regression
+    has_triclass: bool = False
+    has_regressor: bool = False
+    triclass_labels: list[str] = field(default_factory=list)
+    triclass_mode: str = ""                   # cross_sectional | absolute
+    class_thresholds: dict = field(default_factory=dict)  # {"buy":..,"sell":..}
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+_REGRESSOR_FILE = "regressor.joblib"
+_TRICLASS_FILE = "triclass.joblib"
 
 
 def _new_run_id(model_name: str) -> str:
@@ -112,6 +127,11 @@ def save_model(
     target_return_threshold: float = 0.005,
     horizon: int = 1,
     cross_sectional_features: bool = False,
+    regressor=None,
+    triclass=None,
+    triclass_labels: list[str] | None = None,
+    triclass_mode: str = "",
+    class_thresholds: dict | None = None,
     base_dir: str | Path = "data/models",
 ) -> ModelMetadata:
     base_path = Path(base_dir).resolve()
@@ -120,6 +140,14 @@ def save_model(
     run_id = _new_run_id(model_name)
     run_dir = base_path / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
+
+    has_regressor = regressor is not None
+    has_triclass = triclass is not None
+    task = (
+        "binary+triclass+regression"
+        if (has_regressor and has_triclass)
+        else "binary"
+    )
 
     meta = ModelMetadata(
         run_id=run_id,
@@ -135,9 +163,19 @@ def save_model(
         target_return_threshold=target_return_threshold,
         horizon=horizon,
         cross_sectional_features=cross_sectional_features,
+        task=task,
+        has_triclass=has_triclass,
+        has_regressor=has_regressor,
+        triclass_labels=list(triclass_labels or []),
+        triclass_mode=triclass_mode,
+        class_thresholds=dict(class_thresholds or {}),
     )
 
     joblib.dump(cxgb, run_dir / "model.joblib", compress=3)
+    if has_regressor:
+        joblib.dump(regressor, run_dir / _REGRESSOR_FILE, compress=3)
+    if has_triclass:
+        joblib.dump(triclass, run_dir / _TRICLASS_FILE, compress=3)
     (run_dir / "metadata.json").write_text(
         json.dumps(meta.to_dict(), indent=2, default=str), encoding="utf-8"
     )
@@ -188,6 +226,29 @@ def load_model(
             f"{meta.feature_hash} vs recomputed {expected_hash}"
         )
     return cxgb, meta
+
+
+def load_aux_models(
+    run_id: str,
+    *,
+    base_dir: str | Path = "data/models",
+) -> tuple[object | None, object | None]:
+    """Load the optional (regressor, triclass) sibling artifacts for a run.
+
+    Returns ``(None, None)`` for legacy runs that predate the auxiliary
+    heads, so callers can degrade gracefully to the binary-only path.
+    """
+    base_path = Path(base_dir).resolve()
+    run_dir = base_path / run_id
+    regressor = None
+    triclass = None
+    reg_path = run_dir / _REGRESSOR_FILE
+    tri_path = run_dir / _TRICLASS_FILE
+    if reg_path.exists():
+        regressor = joblib.load(reg_path)
+    if tri_path.exists():
+        triclass = joblib.load(tri_path)
+    return regressor, triclass
 
 
 def latest_run_id(model_name: str) -> str | None:

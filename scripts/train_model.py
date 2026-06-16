@@ -21,14 +21,31 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
 import yaml
 
-from src.models.calibration import CalibratedXGB, fit_isotonic_calibrator
-from src.models.dataset import boundary_dates, build_training_matrix, time_based_split
+from src.models.calibration import (
+    CalibratedMulticlass,
+    CalibratedXGB,
+    fit_isotonic_calibrator,
+    fit_isotonic_multiclass,
+)
+from src.models.dataset import (
+    TRICLASS_LABELS,
+    boundary_dates,
+    build_training_matrix,
+    time_based_split,
+)
 from src.models.metrics import evaluate_classifier
 from src.models.registry import save_model
+from src.models.return_regressor import DeterministicXGBRegressor
 from src.models.threshold_tuning import tune_threshold
-from src.models.xgboost_classifier import DeterministicXGBClassifier, XGBParams
+from src.models.xgboost_classifier import (
+    DeterministicXGBClassifier,
+    DeterministicXGBMulticlass,
+    XGBParams,
+)
 from src.utils.logger import get_logger
 from src.utils.secrets import project_root
 
@@ -60,7 +77,58 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                         "default; --no-cross-sectional-features to disable.")
     p.add_argument("--model-name", default="xgb_v1",
                    help="Logical model name (used in registry + filenames).")
+    p.add_argument("--triclass-mode", choices=["cross_sectional", "absolute"],
+                   default="cross_sectional",
+                   help="How the SELL/HOLD/BUY verdict buckets are defined. "
+                        "cross_sectional = per-day terciles of forward return; "
+                        "absolute = fixed +/- return bands.")
+    p.add_argument("--triclass-buy", type=float, default=0.03,
+                   help="Forward return above which a row is BUY when "
+                        "--triclass-mode=absolute (default +3%%).")
+    p.add_argument("--triclass-sell", type=float, default=-0.03,
+                   help="Forward return below which a row is SELL when "
+                        "--triclass-mode=absolute (default -3%%).")
     return p.parse_args(argv)
+
+
+def _spearman_ic(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Rank correlation between predicted and realised returns (the IC).
+
+    Implemented without scipy: Pearson correlation of the rank transforms.
+    """
+    if len(y_true) < 3:
+        return float("nan")
+    rt = pd.Series(y_true).rank().to_numpy()
+    rp = pd.Series(y_pred).rank().to_numpy()
+    if rt.std() == 0 or rp.std() == 0:
+        return float("nan")
+    return float(np.corrcoef(rt, rp)[0, 1])
+
+
+def _evaluate_regressor(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
+    err = y_pred - y_true
+    return {
+        "n": int(len(y_true)),
+        "mae": float(np.mean(np.abs(err))),
+        "rmse": float(np.sqrt(np.mean(err ** 2))),
+        "ic_spearman": _spearman_ic(y_true, y_pred),
+    }
+
+
+def _evaluate_triclass(y_true: np.ndarray, proba: np.ndarray, labels) -> dict:
+    pred = proba.argmax(axis=1)
+    acc = float((pred == y_true).mean()) if len(y_true) else float("nan")
+    per_class = {}
+    for i, lab in enumerate(labels):
+        mask = y_true == i
+        support = int(mask.sum())
+        recall = float((pred[mask] == i).mean()) if support else float("nan")
+        sel = pred == i
+        precision = float((y_true[sel] == i).mean()) if sel.sum() else float("nan")
+        per_class[lab] = {
+            "support": support, "precision": precision, "recall": recall,
+        }
+    return {"accuracy": acc, "per_class": per_class}
 
 
 def _load_cost_model() -> dict:
@@ -95,6 +163,9 @@ def main(argv: list[str] | None = None) -> int:
         label_quantile=args.label_quantile,
         horizon=args.horizon,
         cross_sectional_features=args.cross_sectional_features,
+        triclass_mode=args.triclass_mode,
+        triclass_buy=args.triclass_buy,
+        triclass_sell=args.triclass_sell,
     )
     if matrix.X.empty:
         log.error("Empty training matrix. Run scripts.build_features first.")
@@ -147,6 +218,39 @@ def main(argv: list[str] | None = None) -> int:
     log.info("Test (raw)        : {}", rep_raw.as_dict())
     log.info("Test (calibrated) : {}", rep_cal.as_dict())
 
+    # ----------------------------------------------------------------------
+    # Auxiliary heads: return regressor (price target) + tri-class verdict.
+    # Trained on the SAME splits so they're consistent with the binary model.
+    # ----------------------------------------------------------------------
+    yret_tr = matrix.y_return.iloc[train_idx]
+    yret_te = matrix.y_return.iloc[test_idx].to_numpy()
+    ytri_tr = matrix.y_triclass.iloc[train_idx]
+    ytri_val = matrix.y_triclass.iloc[val_idx]
+    ytri_te = matrix.y_triclass.iloc[test_idx].to_numpy()
+
+    log.info("Training return regressor (price-target head)...")
+    regressor = DeterministicXGBRegressor()
+    regressor.fit(X_tr, yret_tr)
+    reg_pred_te = regressor.predict(X_te)
+    reg_metrics = _evaluate_regressor(yret_te, reg_pred_te)
+    log.info("Regressor test: {}", reg_metrics)
+
+    log.info("Training tri-class verdict head (SELL/HOLD/BUY)...")
+    tri_base = DeterministicXGBMulticlass(params=XGBParams(), num_class=3)
+    tri_base.fit(X_tr, ytri_tr)
+    triclass = None
+    tri_metrics: dict = {}
+    try:
+        tri_cal = fit_isotonic_multiclass(tri_base, X_val, ytri_val)
+        triclass = CalibratedMulticlass(tri_base, tri_cal, TRICLASS_LABELS)
+        tri_proba_te = triclass.predict_proba(X_te)
+        tri_metrics = _evaluate_triclass(ytri_te, tri_proba_te, TRICLASS_LABELS)
+        log.info("Tri-class test: {}", tri_metrics)
+    except ValueError as exc:
+        log.warning(
+            "Tri-class calibration skipped ({}); verdict head not saved.", exc
+        )
+
     metrics = {
         "test_raw": rep_raw.as_dict(),
         "test_calibrated": rep_cal.as_dict(),
@@ -159,11 +263,14 @@ def main(argv: list[str] | None = None) -> int:
         },
         "split_sizes": {"train": int(len(X_tr)), "val": int(len(X_val)),
                         "test": int(len(X_te))},
+        "regressor": reg_metrics,
+        "triclass": tri_metrics,
         "config": {
             "label_mode": args.label_mode,
             "label_quantile": args.label_quantile,
             "horizon": args.horizon,
             "cross_sectional_features": args.cross_sectional_features,
+            "triclass_mode": args.triclass_mode,
             "n_features": int(matrix.X.shape[1]),
             "n_symbols": int(matrix.meta["symbol"].nunique()),
         },
@@ -181,6 +288,11 @@ def main(argv: list[str] | None = None) -> int:
         target_return_threshold=args.target,
         horizon=args.horizon,
         cross_sectional_features=args.cross_sectional_features,
+        regressor=regressor,
+        triclass=triclass,
+        triclass_labels=list(TRICLASS_LABELS),
+        triclass_mode=args.triclass_mode,
+        class_thresholds={"buy": args.triclass_buy, "sell": args.triclass_sell},
     )
     log.success("Model saved | run_id={} | path={}", meta.run_id,
                 Path("data/models") / meta.run_id)

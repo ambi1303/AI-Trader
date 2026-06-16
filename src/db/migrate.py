@@ -19,7 +19,7 @@ from src.utils.logger import get_logger
 
 log = get_logger("db.migrate")
 
-SCHEMA_VERSION = 4  # v4: paper_trades enrichment + outbox unique index (Week 5)
+SCHEMA_VERSION = 5  # v5: fundamentals + tri-class/price-target prediction cols
 _SCHEMA_FILE = Path(__file__).parent / "schema.sql"
 
 
@@ -80,8 +80,60 @@ def _migrate_to_v4(conn) -> None:
     )
 
 
+def _migrate_to_v5(conn) -> None:
+    """v5: fundamentals support + tri-class / price-target prediction columns.
+
+    ``fundamental_data`` itself is created by schema.sql (CREATE IF NOT
+    EXISTS) which runs before these handlers, so here we only patch the
+    pre-existing wide tables that ALTER TABLE must touch:
+
+    * ``feature_data`` gains nullable fundamental feature columns.
+    * ``predictions_log`` gains the verdict / class-probability /
+      predicted-return / target / stop columns the tri-class model emits.
+
+    All additions are nullable so old rows remain valid.
+    """
+    feat_cols = _table_columns(conn, "feature_data")
+    feat_additions: list[tuple[str, str]] = [
+        ("pe_ttm",          "REAL"),
+        ("pb",              "REAL"),
+        ("roe",             "REAL"),
+        ("debt_to_equity",  "REAL"),
+        ("profit_margin",   "REAL"),
+        ("revenue_growth",  "REAL"),
+        ("earnings_growth", "REAL"),
+        ("dividend_yield",  "REAL"),
+        ("log_market_cap",  "REAL"),
+    ]
+    for col, ddl in feat_additions:
+        if col not in feat_cols:
+            log.info("v5 migration: adding feature_data.{}", col)
+            conn.execute(f"ALTER TABLE feature_data ADD COLUMN {col} {ddl}")
+
+    pred_cols = _table_columns(conn, "predictions_log")
+    pred_additions: list[tuple[str, str]] = [
+        ("verdict",          "TEXT"),
+        ("prob_buy",         "REAL"),
+        ("prob_hold",        "REAL"),
+        ("prob_sell",        "REAL"),
+        ("predicted_return", "REAL"),
+        ("target_price",     "REAL"),
+        ("stop_price",       "REAL"),
+    ]
+    for col, ddl in pred_additions:
+        if col not in pred_cols:
+            log.info("v5 migration: adding predictions_log.{}", col)
+            conn.execute(f"ALTER TABLE predictions_log ADD COLUMN {col} {ddl}")
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS ix_fundamental_symbol_date "
+        "ON fundamental_data(symbol, as_of_date)"
+    )
+
+
 _VERSIONED_MIGRATIONS = {
     4: _migrate_to_v4,
+    5: _migrate_to_v5,
 }
 
 

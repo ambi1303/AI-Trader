@@ -29,15 +29,18 @@
         </thead>
         <tbody class="divide-y divide-slate-800">
           {% for p in open_positions %}
-          <tr class="hover:bg-slate-800/40">
+          <tr class="hover:bg-slate-800/40"
+              data-live-symbol="{{ p.symbol }}"
+              data-entry="{{ p.entry_price }}"
+              data-qty="{{ p.qty }}">
             <td class="px-4 py-2 font-medium">{{ p.symbol }}</td>
             <td class="px-4 py-2 hidden sm:table-cell text-slate-400">{{ p.sector }}</td>
             <td class="px-4 py-2 text-right tabular-nums">{{ p.qty }}</td>
             <td class="px-4 py-2 text-right tabular-nums">{{ m.num(p.entry_price) }}</td>
-            <td class="px-4 py-2 text-right tabular-nums">{{ m.num(p.last_close) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums"><span class="live-ltp">{{ m.num(p.last_close) }}</span></td>
             <td class="px-4 py-2 text-right tabular-nums hidden md:table-cell">{{ m.num(p.stop_loss) }}</td>
             <td class="px-4 py-2 text-right tabular-nums hidden md:table-cell">{{ m.num(p.take_profit) }}</td>
-            <td class="px-4 py-2 text-right tabular-nums">{{ m.money(p.unrealised_pnl) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums"><span class="live-pnl">{{ m.money(p.unrealised_pnl) }}</span></td>
             <td class="px-4 py-2 text-right tabular-nums">{{ p.holding_days }}</td>
           </tr>
           {% endfor %}
@@ -94,4 +97,5 @@
   </section>
 
 </section>
+<script src="/static/live-price.js"></script>
 {% endblock %}

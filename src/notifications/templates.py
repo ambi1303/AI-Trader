@@ -166,6 +166,28 @@ _HTML_TEMPLATE = r"""<!doctype html>
           {% endif %}
         </td></tr>
 
+        {% if report.walk_forward %}
+        {% set wf = report.walk_forward %}
+        <tr><td style="padding:0 22px 18px;">
+          <h3 style="margin:0 0 8px;font-size:15px;color:#0b3d91;">Out-of-sample (walk-forward)</h3>
+          <table cellpadding="4" cellspacing="0" style="font-size:13px;">
+            <tr><td style="color:#555;">Folds / Predictions</td>
+                <td>{{ wf.folds_completed }} folds, {{ '{:,}'.format(wf.n_predictions) }} test rows</td></tr>
+            <tr><td style="color:#555;">AUC (calibrated)</td>
+                <td>{{ '%.3f'|format(wf.auc) if wf.auc is not none else 'n/a' }}</td></tr>
+            <tr><td style="color:#555;">Brier</td>
+                <td>{{ '%.4f'|format(wf.brier) if wf.brier is not none else 'n/a' }}</td></tr>
+            <tr><td style="color:#555;">Mean threshold</td>
+                <td>{{ '%.3f'|format(wf.mean_threshold) if wf.mean_threshold is not none else 'n/a' }}</td></tr>
+          </table>
+          <p style="margin:6px 0 0;color:#888;font-size:11px;">
+            Trustworthy out-of-sample read (train past &rarr; test next window, rolled forward).
+            From {{ wf.source_file|e }}. Refresh with
+            <code>python -m scripts.walk_forward_eval --save</code>.
+          </p>
+        </td></tr>
+        {% endif %}
+
         <tr><td style="padding:0 22px 18px;">
           <h3 style="margin:0 0 8px;font-size:15px;color:#0b3d91;">Latest backtest</h3>
           {% if report.latest_backtest %}
@@ -357,6 +379,14 @@ Generated at  : {{ report.generated_at }} (UTC)
   threshold       : {{ '%.3f'|format(report.threshold_used or 0) }}
   git_sha         : {{ (report.latest_model.git_sha or 'unknown')|scrub }}
 {% else %}  (no trained model yet)
+{% endif %}
+{% if report.walk_forward %}{% set wf = report.walk_forward %}
+[3b] Out-of-sample (walk-forward) -- the trustworthy model-health read
+  folds/preds    : {{ wf.folds_completed }} folds, {{ wf.n_predictions }} test rows
+  AUC (calib)    : {{ '%.3f'|format(wf.auc) if wf.auc is not none else 'n/a' }}
+  Brier          : {{ '%.4f'|format(wf.brier) if wf.brier is not none else 'n/a' }}
+  mean_threshold : {{ '%.3f'|format(wf.mean_threshold) if wf.mean_threshold is not none else 'n/a' }}
+  source         : {{ wf.source_file|scrub }} (refresh: scripts.walk_forward_eval --save)
 {% endif %}
 
 [4] Latest backtest

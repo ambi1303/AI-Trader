@@ -33,6 +33,7 @@ and Cloudflare; we don't try to second-guess them here.
 
 from __future__ import annotations
 
+import re
 import time
 from collections import deque
 from pathlib import Path
@@ -43,10 +44,12 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                RedirectResponse)
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from src.utils.logger import get_logger
 from src.web import auth as web_auth
+from src.web import live
 from src.web import queries as q
 
 log = get_logger("web.app")
@@ -55,6 +58,16 @@ _HERE = Path(__file__).resolve().parent
 _TEMPLATES_DIR = _HERE / "templates"
 _STATIC_DIR = _HERE / "static"
 _REPORTS_DIR = Path("data/reports/notifications")  # produced by the daily pipeline
+
+# NSE symbols are uppercase alphanumerics plus '&' and '-' (M&M, BAJAJ-AUTO,
+# ARE&M). We allow-list strictly so a path/param can't smuggle anything weird
+# even though every downstream query is parameterised.
+_SYMBOL_RE = re.compile(r"^[A-Z0-9&\-]{1,20}$")
+
+
+def _valid_symbol(symbol: str) -> str | None:
+    s = (symbol or "").strip().upper()
+    return s if _SYMBOL_RE.match(s) else None
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +295,55 @@ def create_app() -> FastAPI:
                 "user": user,
             },
         )
+
+    @app.get("/stock/{symbol}", response_class=HTMLResponse,
+             include_in_schema=False)
+    async def stock_detail(request: Request, symbol: str,
+                           user: str = Depends(require_user)):
+        sym = _valid_symbol(symbol)
+        if sym is None:
+            raise HTTPException(status_code=404, detail="unknown symbol")
+        detail = q.get_stock_detail(sym)
+        if detail.get("last_close") is None and detail.get("prediction") is None:
+            raise HTTPException(status_code=404, detail="no data for symbol")
+        return templates.TemplateResponse(
+            request, "stock.html", {"d": detail, "user": user, "symbol": sym},
+        )
+
+    @app.get("/api/ohlc/{symbol}", include_in_schema=False)
+    async def api_ohlc(symbol: str,
+                       user: str = Depends(require_user)) -> JSONResponse:
+        sym = _valid_symbol(symbol)
+        if sym is None:
+            raise HTTPException(status_code=404, detail="unknown symbol")
+        return JSONResponse(q.get_ohlc(sym))
+
+    @app.get("/api/ltp/{symbol}", include_in_schema=False)
+    async def api_ltp(symbol: str,
+                      user: str = Depends(require_user)) -> JSONResponse:
+        sym = _valid_symbol(symbol)
+        if sym is None:
+            raise HTTPException(status_code=404, detail="unknown symbol")
+        # The upstream call is blocking I/O -> run off the event loop.
+        payload = await run_in_threadpool(live.get_live_quote, sym)
+        return JSONResponse(payload)
+
+    @app.get("/api/ltp", include_in_schema=False)
+    async def api_ltp_batch(symbols: str = "",
+                            user: str = Depends(require_user)) -> JSONResponse:
+        # Comma-separated; validate + de-dup + cap so a crafted query can't
+        # fan out into an unbounded number of upstream calls.
+        seen: list[str] = []
+        for raw in (symbols or "").split(","):
+            s = _valid_symbol(raw)
+            if s and s not in seen:
+                seen.append(s)
+            if len(seen) >= 30:
+                break
+        if not seen:
+            return JSONResponse({"quotes": {}, "market_open": live.is_market_open()})
+        quotes = await run_in_threadpool(live.get_live_quotes, seen)
+        return JSONResponse({"quotes": quotes, "market_open": live.is_market_open()})
 
     @app.get("/report.pdf", include_in_schema=False)
     async def report_pdf(user: str = Depends(require_user)):

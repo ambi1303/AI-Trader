@@ -20,14 +20,83 @@ from __future__ import annotations
 import json
 from datetime import date
 
+import numpy as np
 import pandas as pd
 
 from src.models.dataset import add_cross_sectional_features
-from src.models.registry import ModelMetadata, load_model
+from src.models.registry import ModelMetadata, load_aux_models, load_model
 from src.utils.db import execute, fetch_all
 from src.utils.logger import get_logger
 
 log = get_logger("models.predict")
+
+# Protective long-stop distance is clamped so a near-zero ATR can't produce a
+# stop on top of the entry and a runaway ATR can't produce an absurd stop.
+_STOP_ATR_MULT = 2.0
+_STOP_MIN_PCT = 0.03
+_STOP_MAX_PCT = 0.15
+
+
+def _enrich_prediction(
+    row: pd.Series,
+    X: pd.DataFrame,
+    *,
+    regressor,
+    triclass,
+    meta: ModelMetadata,
+) -> dict:
+    """Compute verdict / class probabilities / predicted return / target /
+    stop for a single feature row, given the optional auxiliary heads.
+
+    Degrades gracefully: a legacy run without the aux artifacts returns the
+    enrichment fields as None so the binary path keeps working unchanged.
+    """
+    out: dict = {
+        "verdict": None,
+        "prob_buy": None,
+        "prob_hold": None,
+        "prob_sell": None,
+        "predicted_return": None,
+        "target_price": None,
+        "stop_price": None,
+    }
+
+    close = row.get("close")
+    close = float(close) if close is not None and not pd.isna(close) else None
+    atr_pct = row.get("atr_pct")
+    atr_pct = float(atr_pct) if atr_pct is not None and not pd.isna(atr_pct) else None
+
+    if triclass is not None:
+        proba = triclass.predict_proba(X)[0]
+        labels = list(getattr(triclass, "class_labels", ("SELL", "HOLD", "BUY")))
+        by_label = {labels[i]: float(proba[i]) for i in range(len(labels))}
+        out["prob_sell"] = by_label.get("SELL")
+        out["prob_hold"] = by_label.get("HOLD")
+        out["prob_buy"] = by_label.get("BUY")
+        out["verdict"] = labels[int(np.argmax(proba))]
+
+    if regressor is not None:
+        pred_ret = float(regressor.predict(X)[0])
+        out["predicted_return"] = pred_ret
+        if close is not None:
+            out["target_price"] = round(close * (1.0 + pred_ret), 2)
+
+    if close is not None:
+        stop_dist = _STOP_MIN_PCT
+        if atr_pct is not None:
+            stop_dist = min(max(_STOP_ATR_MULT * atr_pct, _STOP_MIN_PCT), _STOP_MAX_PCT)
+        out["stop_price"] = round(close * (1.0 - stop_dist), 2)
+
+    return out
+
+
+_PRED_INSERT_SQL = """
+    INSERT INTO predictions_log
+        (run_id, symbol, prediction_date, raw_prob, calibrated_prob,
+         feature_snapshot_json, verdict, prob_buy, prob_hold, prob_sell,
+         predicted_return, target_price, stop_price)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
 
 
 def _load_feature_row(symbol: str, on_date: date | None) -> pd.DataFrame:
@@ -74,6 +143,7 @@ def predict_for_symbol(
     feature row is available.
     """
     cxgb, meta = load_model(run_id)
+    regressor, triclass = load_aux_models(run_id)
     row = _load_feature_row(symbol, on_date)
     if row.empty:
         log.warning("No feature row for {} on {}", symbol, on_date)
@@ -85,21 +155,22 @@ def predict_for_symbol(
 
     raw = float(cxgb.predict_raw(X)[0])
     cal = float(cxgb.predict_calibrated(X)[0])
+    enriched = _enrich_prediction(
+        row.iloc[0], X, regressor=regressor, triclass=triclass, meta=meta
+    )
 
     snapshot = X.iloc[0].to_dict()
     feature_date = row["feature_date"].iloc[0]
 
     if persist:
         execute(
-            """
-            INSERT INTO predictions_log
-                (run_id, symbol, prediction_date, raw_prob, calibrated_prob,
-                 feature_snapshot_json)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
+            _PRED_INSERT_SQL,
             (
                 meta.run_id, symbol, str(feature_date), raw, cal,
                 json.dumps(snapshot, default=str),
+                enriched["verdict"], enriched["prob_buy"], enriched["prob_hold"],
+                enriched["prob_sell"], enriched["predicted_return"],
+                enriched["target_price"], enriched["stop_price"],
             ),
         )
 
@@ -113,6 +184,7 @@ def predict_for_symbol(
         "would_signal": (
             cal >= meta.threshold if meta.threshold is not None else None
         ),
+        **enriched,
     }
 
 
@@ -157,6 +229,7 @@ def predict_for_universe_cross_sectional(
     per symbol.
     """
     cxgb, meta = load_model(run_id)
+    regressor, triclass = load_aux_models(run_id)
     on_str = _resolve_universe_date(on_date)
     if on_str is None:
         log.warning("No feature_data available to score.")
@@ -182,17 +255,19 @@ def predict_for_universe_cross_sectional(
         )
         raw = float(cxgb.predict_raw(X)[0])
         cal = float(cxgb.predict_calibrated(X)[0])
+        enriched = _enrich_prediction(
+            row, X, regressor=regressor, triclass=triclass, meta=meta
+        )
         if persist:
             execute(
-                """
-                INSERT INTO predictions_log
-                    (run_id, symbol, prediction_date, raw_prob, calibrated_prob,
-                     feature_snapshot_json)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
+                _PRED_INSERT_SQL,
                 (
                     meta.run_id, sym, str(feature_date), raw, cal,
                     json.dumps(X.iloc[0].to_dict(), default=str),
+                    enriched["verdict"], enriched["prob_buy"],
+                    enriched["prob_hold"], enriched["prob_sell"],
+                    enriched["predicted_return"], enriched["target_price"],
+                    enriched["stop_price"],
                 ),
             )
         out.append({
@@ -205,6 +280,7 @@ def predict_for_universe_cross_sectional(
             "would_signal": (
                 cal >= meta.threshold if meta.threshold is not None else None
             ),
+            **enriched,
         })
     df = pd.DataFrame(out)
     if not df.empty:

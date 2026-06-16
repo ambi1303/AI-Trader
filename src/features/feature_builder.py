@@ -38,7 +38,22 @@ from src.utils.logger import get_logger
 
 log = get_logger("features.builder")
 
-FEATURE_SET_VERSION = 1
+FEATURE_SET_VERSION = 2  # v2: added fundamental features (as-of joined)
+
+# Fundamental feature columns (as-of joined from fundamental_data, no
+# look-ahead). market_cap is stored as its natural log so the size factor is
+# well-behaved for tree splits and cross-sectional ranking.
+_FUNDAMENTAL_COLUMNS: tuple[str, ...] = (
+    "pe_ttm",
+    "pb",
+    "roe",
+    "debt_to_equity",
+    "profit_margin",
+    "revenue_growth",
+    "earnings_growth",
+    "dividend_yield",
+    "log_market_cap",
+)
 
 # Columns of feature_data that we populate. Keep in sync with schema.sql.
 _FEATURE_COLUMNS: tuple[str, ...] = (
@@ -95,6 +110,7 @@ _FEATURE_COLUMNS: tuple[str, ...] = (
     "hit_lower_circuit",
     "days_since_circuit",
     "low_volume_flag",
+    *_FUNDAMENTAL_COLUMNS,
 )
 
 
@@ -193,6 +209,64 @@ def _load_sector_index(symbol: str) -> str:
     return rows[0]["sector_index"] if rows else "^NSEI"
 
 
+def _load_fundamentals(symbol: str) -> pd.DataFrame:
+    """Load all fundamental rows for a symbol, oldest first.
+
+    Returns an empty frame if none exist (the symbol simply gets NaN
+    fundamental features, which XGBoost handles natively).
+    """
+    rows = fetch_all(
+        """
+        SELECT as_of_date, pe_ttm, pb, roe, debt_to_equity, profit_margin,
+               revenue_growth, earnings_growth, dividend_yield, market_cap
+        FROM   fundamental_data
+        WHERE  symbol = ?
+        ORDER BY as_of_date
+        """,
+        (symbol,),
+    )
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame([dict(r) for r in rows])
+
+
+def _attach_fundamentals(
+    out: pd.DataFrame, fundamentals_df: pd.DataFrame | None
+) -> pd.DataFrame:
+    """As-of (backward) join fundamentals onto each feature_date.
+
+    For every feature row dated T we take the most recent fundamental row
+    whose ``as_of_date`` is <= T. This guarantees no look-ahead: a feature
+    date can only see fundamentals that were already published by then.
+    Values persist (forward-fill) until the next quarterly report.
+    """
+    for c in _FUNDAMENTAL_COLUMNS:
+        out[c] = np.nan
+    if fundamentals_df is None or fundamentals_df.empty:
+        return out
+
+    right = fundamentals_df.copy()
+    right["d"] = pd.to_datetime(right["as_of_date"], errors="coerce")
+    right = right.dropna(subset=["d"]).sort_values("d")
+    if right.empty:
+        return out
+
+    mc = pd.to_numeric(right.get("market_cap"), errors="coerce")
+    right["log_market_cap"] = np.log(mc.where(mc > 0))
+
+    cols_present = [c for c in _FUNDAMENTAL_COLUMNS if c in right.columns]
+    left = pd.DataFrame({"d": pd.to_datetime(pd.Index(out.index))})
+    left = left.sort_values("d").reset_index(drop=True)
+    merged = pd.merge_asof(
+        left, right[["d", *cols_present]], on="d", direction="backward"
+    )
+    merged["date_key"] = merged["d"].dt.date
+    for c in cols_present:
+        mapping = dict(zip(merged["date_key"], merged[c]))
+        out[c] = [mapping.get(d, np.nan) for d in out.index]
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Feature construction (pure)
 # ---------------------------------------------------------------------------
@@ -205,6 +279,7 @@ def compute_features_for_symbol(
     vix_close: pd.Series | None = None,
     sector_close: pd.Series | None = None,
     circuit_df: pd.DataFrame | None = None,
+    fundamentals_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Pure: takes already-loaded DataFrames and returns a feature DataFrame."""
     if price_df.empty:
@@ -314,6 +389,9 @@ def compute_features_for_symbol(
     out = cf.attach_circuit_flags(out, circuit_df)
     out["low_volume_flag"] = cf.low_volume_flag(volume, 20, 0.20)
 
+    # Fundamentals (as-of joined, forward-filled, no look-ahead)
+    out = _attach_fundamentals(out, fundamentals_df)
+
     return out[list(_FEATURE_COLUMNS)]
 
 
@@ -394,6 +472,7 @@ def build_for_symbol(
         else nifty_close
     )
     circuit_df = _load_circuit_flags(symbol)
+    fundamentals_df = _load_fundamentals(symbol)
 
     feat_df = compute_features_for_symbol(
         price_df,
@@ -401,6 +480,7 @@ def build_for_symbol(
         vix_close=vix_close,
         sector_close=sector_close,
         circuit_df=circuit_df,
+        fundamentals_df=fundamentals_df,
     )
     rows_out = _persist(symbol, feat_df)
     log.info("Built {} feature rows for {}", rows_out, symbol)
