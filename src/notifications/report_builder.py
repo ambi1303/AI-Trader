@@ -325,12 +325,18 @@ def _load_latest_model() -> ModelSnapshot | None:
 
 
 def _load_latest_backtest() -> BacktestSnapshot | None:
+    # Prefer a representative full-period backtest over one-off STRESS scenarios.
+    # Scenario runs are persisted with a 'stress_' name prefix and are *meant*
+    # to look bad (they replay corrections/crashes), so anchoring the daily
+    # headline on them is misleading. `(name LIKE 'stress_%')` sorts non-stress
+    # runs (0) ahead of stress runs (1); we fall back to a stress run only if no
+    # canonical backtest exists.
     row = fetch_one(
         """
         SELECT bt_run_id, name, start_date, end_date,
                initial_capital, metrics_json, created_at
         FROM   backtest_runs
-        ORDER  BY created_at DESC, rowid DESC
+        ORDER  BY (name LIKE 'stress_%'), created_at DESC, bt_run_id DESC
         LIMIT  1
         """
     )
@@ -356,7 +362,7 @@ def _load_recent_trades(n: int) -> list[TradeRow]:
     bt = fetch_one(
         """
         SELECT bt_run_id FROM backtest_runs
-        ORDER BY created_at DESC, rowid DESC
+        ORDER BY (name LIKE 'stress_%'), created_at DESC, bt_run_id DESC
         LIMIT 1
         """
     )

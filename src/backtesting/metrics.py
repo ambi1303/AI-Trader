@@ -118,8 +118,16 @@ def compute_metrics(
         if std > 0 else 0.0
     )
 
-    downside = daily_ret[daily_ret < 0]
-    dstd = float(downside.std(ddof=1)) if len(downside) > 1 else 0.0
+    # Sortino uses the canonical *target downside deviation* (target/MAR = 0):
+    # the root-mean-square of the negative excursions over ALL periods, i.e.
+    # sqrt(mean(min(r, 0)^2)). This is the standard definition (Sortino & Price)
+    # and, unlike the sample std of just the negative subset, guarantees the
+    # denominator <= total stdev, so |Sortino| >= |Sharpe| for a given-sign mean.
+    if len(daily_ret) > 0:
+        neg = daily_ret.clip(upper=0.0)
+        dstd = float(np.sqrt((neg ** 2).mean()))
+    else:
+        dstd = 0.0
     sortino = (
         float(daily_ret.mean() / dstd * np.sqrt(TRADING_DAYS))
         if dstd > 0 else 0.0
