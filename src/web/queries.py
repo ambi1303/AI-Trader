@@ -567,6 +567,32 @@ def get_latest_fundamentals(symbol: str) -> dict[str, Any] | None:
     return row
 
 
+def search_symbols(term: str, limit: int = 8) -> list[str]:
+    """Symbol autocomplete over the analyzable price universe.
+
+    Searches ``price_data`` distinct symbols (BhavCopy covers ~all NSE names we
+    can chart/analyze). Prefix matches rank above substring matches. User input
+    is upper-cased and stripped of LIKE wildcards so it can't smuggle patterns.
+    """
+    t = (term or "").strip().upper()
+    # Strip wildcard/meta chars; valid NSE symbols are [A-Z0-9&-] only.
+    t = "".join(ch for ch in t if ch.isalnum() or ch in "&-")
+    if not t:
+        return []
+    prefix = t + "%"
+    contains = "%" + t + "%"
+    rows = _safe_fetch(
+        """
+        SELECT DISTINCT symbol FROM price_data
+        WHERE  symbol LIKE ? OR symbol LIKE ?
+        ORDER  BY (symbol LIKE ?) DESC, symbol
+        LIMIT  ?
+        """,
+        (prefix, contains, prefix, int(limit)),
+    )
+    return [r["symbol"] for r in rows]
+
+
 def get_stock_detail(symbol: str, as_of: str | None = None) -> dict[str, Any]:
     """Everything the per-stock detail page needs in one bundle."""
     today = as_of or date.today().isoformat()
@@ -620,7 +646,55 @@ def get_stock_detail(symbol: str, as_of: str | None = None) -> dict[str, Any]:
     detail["fundamentals_age_days"] = fund_age
     detail["fundamentals_staleness"] = assess.rate_staleness(fund_age)
     detail["fundamental_ratings"] = assess.fundamental_ratings(fundamentals)
+
+    # ---- Complete analysis: technicals + conviction + buy/sell zones --------
+    # Universe names use stored DB history (instant); any other NSE stock is
+    # fetched on demand. Wrapped so a data hiccup never breaks the page.
+    detail["technicals"] = {"available": False}
+    detail["conviction"] = {"overall": None, "factors": [], "reasons": []}
+    detail["zones"] = {"available": False}
+    detail["rule_verdict"] = {"verdict": None}
+    detail["analysis_source"] = None
+    try:
+        from src.analysis import datasource, stock_analysis
+        adf, fund_for_analysis, asrc = datasource.get_price_and_fundamentals(
+            sym, fundamentals
+        )
+        analysis = stock_analysis.analyze(adf, fund_for_analysis)
+        detail["technicals"] = analysis["technicals"]
+        detail["conviction"] = analysis["conviction"]
+        detail["zones"] = analysis["zones"]
+        detail["rule_verdict"] = analysis["rule_verdict"]
+        detail["analysis_source"] = asrc
+        # If the universe had no fundamentals but we fetched them live, show them.
+        if not fundamentals and fund_for_analysis:
+            detail["fundamentals"] = fund_for_analysis
+            detail["fundamental_ratings"] = assess.fundamental_ratings(fund_for_analysis)
+            f_age = assess.staleness_days(
+                fund_for_analysis.get("as_of_date"), today=today
+            )
+            detail["fundamentals_age_days"] = f_age
+            detail["fundamentals_staleness"] = assess.rate_staleness(f_age)
+    except Exception as exc:  # noqa: BLE001 -- analysis is best-effort
+        log.warning("analysis failed for {}: {}", sym, exc)
+
     detail["summary"] = assess.verdict_summary(detail)
+    # No trained-model call (stock outside the daily universe)? Fall back to a
+    # transparent rule-based summary built from the conviction score.
+    rv = detail.get("rule_verdict") or {}
+    conv = detail.get("conviction") or {}
+    if not pred and rv.get("verdict") and conv.get("overall") is not None:
+        tone = {"BUY": "good", "HOLD": "ok", "SELL": "bad"}.get(rv["verdict"], "neutral")
+        detail["summary"] = {
+            "headline": f"Rule-based read: {rv['verdict']} "
+                        f"\u00b7 conviction {conv['overall']}/100.",
+            "detail": "This stock is outside the daily ML model's universe, so "
+                      "this is a transparent factor score (fundamentals, "
+                      "valuation, technicals, momentum, risk) \u2014 not the "
+                      "trained model.",
+            "tone": tone,
+            "marginal": False,
+        }
     detail["round_trip_cost_pct"] = assess.round_trip_cost_pct()
     detail["is_marginal"] = assess.is_marginal_move(upside_pct)
     return detail

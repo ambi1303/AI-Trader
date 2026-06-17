@@ -322,6 +322,55 @@ def test_signal_today_appears(client: TestClient,
     assert "INFY" in syms
 
 
+def test_stock_page_renders_with_analysis_cards(
+    client: TestClient, env: dict[str, str]
+) -> None:
+    client.post(
+        "/login",
+        data={"username": env["WEB_USERNAME"],
+              "password": env["WEB_PASSWORD"]},
+    )
+    r = client.get("/stock/RELIANCE")
+    assert r.status_code == 200
+    # New analysis sections are present on the page.
+    assert "Buy / Sell zones" in r.text
+    assert "Conviction score" in r.text
+    # Header search box is on every authenticated page.
+    assert 'id="stock-search"' in r.text
+
+
+def test_search_endpoint_returns_matches(
+    client: TestClient, env: dict[str, str]
+) -> None:
+    client.post(
+        "/login",
+        data={"username": env["WEB_USERNAME"],
+              "password": env["WEB_PASSWORD"]},
+    )
+    r = client.get("/api/search", params={"term": "REL"})
+    assert r.status_code == 200
+    results = r.json()["results"]
+    assert "RELIANCE" in results  # seeded price_data symbol
+
+
+def test_search_endpoint_requires_auth(client: TestClient) -> None:
+    r = client.get("/api/search", params={"term": "REL"})
+    assert r.status_code == 401
+
+
+def test_search_endpoint_empty_term_is_safe(
+    client: TestClient, env: dict[str, str]
+) -> None:
+    client.post(
+        "/login",
+        data={"username": env["WEB_USERNAME"],
+              "password": env["WEB_PASSWORD"]},
+    )
+    r = client.get("/api/search", params={"term": ""})
+    assert r.status_code == 200
+    assert r.json()["results"] == []
+
+
 # --------------------------------------------------------------------------
 # Rate limiter
 # --------------------------------------------------------------------------

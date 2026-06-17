@@ -7,6 +7,11 @@
 {% set f = d.fundamentals %}
 {% set s = d.summary %}
 {% set fr = d.fundamental_ratings %}
+{% set t = d.technicals %}
+{% set z = d.zones %}
+{% set c = d.conviction %}
+{% set tone_text = {'good':'text-emerald-400','ok':'text-amber-300','warn':'text-amber-300','bad':'text-rose-400','neutral':'text-slate-300'} %}
+{% set tone_chip = {'good':'bg-emerald-500/15 border-emerald-700 text-emerald-200','ok':'bg-slate-700/40 border-slate-600 text-slate-200','warn':'bg-amber-500/15 border-amber-700 text-amber-200','bad':'bg-rose-500/15 border-rose-700 text-rose-200','neutral':'bg-slate-800 border-slate-700 text-slate-300'} %}
 
 {# ---- Header ---- #}
 <div class="mb-4 flex items-center justify-between gap-3 flex-wrap">
@@ -84,6 +89,87 @@
 </div>
 {% endif %}
 
+{# ---- Buy/Sell zones + Conviction score ---- #}
+<div class="grid grid-cols-1 md:grid-cols-2 gap-5 mb-5">
+  {# Buy / Sell zones #}
+  <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="text-sm font-semibold text-slate-300">Buy / Sell zones</h2>
+      <span class="text-[11px] text-slate-500">volatility-based (ATR)</span>
+    </div>
+    {% if z and z.available %}
+    <div class="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+      <div>
+        <div class="text-xs text-emerald-400/80">Strong buy below</div>
+        <div class="font-semibold tabular-nums text-emerald-300">{{ m.num(z.strong_buy_below) }}</div>
+      </div>
+      <div>
+        <div class="text-xs text-slate-400">Buy zone</div>
+        <div class="font-semibold tabular-nums">{{ m.num(z.buy_low) }} &ndash; {{ m.num(z.buy_high) }}</div>
+      </div>
+      <div>
+        <div class="text-xs text-amber-400/80">Avoid above</div>
+        <div class="font-semibold tabular-nums text-amber-300">{{ m.num(z.avoid_above) }}</div>
+      </div>
+      <div>
+        <div class="text-xs text-rose-400/80">Stop loss</div>
+        <div class="font-semibold tabular-nums text-rose-300">{{ m.num(z.stop) }}</div>
+      </div>
+      <div>
+        <div class="text-xs text-slate-400">Target 1</div>
+        <div class="font-semibold tabular-nums text-emerald-300">{{ m.num(z.target1) }}</div>
+      </div>
+      <div>
+        <div class="text-xs text-slate-400">Target 2</div>
+        <div class="font-semibold tabular-nums text-emerald-300">{{ m.num(z.target2) }}</div>
+      </div>
+    </div>
+    <div class="mt-3 pt-2 border-t border-slate-800 text-xs text-slate-400">
+      Risk : Reward &asymp; <span class="text-slate-200 font-semibold">1 : {{ z.risk_reward }}</span>
+      &middot; zones scale with the stock's own volatility (ATR), not fixed %.
+    </div>
+    {% else %}
+    <p class="text-slate-500 text-sm">Not enough price history to compute zones.</p>
+    {% endif %}
+  </div>
+
+  {# Conviction score #}
+  <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="text-sm font-semibold text-slate-300">Conviction score</h2>
+      {% if c and c.overall is not none %}
+      <span class="text-[11px] px-2 py-0.5 rounded border {{ tone_chip.get(c.tone, tone_chip.neutral) }}">{{ c.label }}</span>
+      {% endif %}
+    </div>
+    {% if c and c.overall is not none %}
+    <div class="flex items-end gap-2 mb-3">
+      <div class="text-4xl font-bold {{ tone_text.get(c.tone, 'text-slate-200') }}">{{ c.overall }}</div>
+      <div class="text-slate-500 text-sm mb-1.5">/ 100</div>
+    </div>
+    <div class="space-y-2">
+      {% for fac in c.factors %}
+      {% set fc = 'bg-emerald-500' if fac.score >= 60 else ('bg-amber-500' if fac.score >= 45 else 'bg-rose-500') %}
+      <div>
+        <div class="flex justify-between text-xs">
+          <span class="text-slate-400">{{ fac.name }}</span>
+          <span class="text-slate-300 tabular-nums">{{ fac.score }}</span>
+        </div>
+        <div class="h-1.5 bg-slate-800 rounded mt-1"><div class="h-1.5 rounded {{ fc }}" style="width: {{ fac.score }}%"></div></div>
+      </div>
+      {% endfor %}
+    </div>
+    {% if c.reasons %}
+    <ul class="mt-3 text-xs text-slate-400 space-y-0.5 list-disc list-inside">
+      {% for r in c.reasons %}<li>{{ r }}</li>{% endfor %}
+    </ul>
+    {% endif %}
+    <p class="text-[11px] text-slate-600 mt-3">Transparent factor blend &mdash; a readability aid, not advice.</p>
+    {% else %}
+    <p class="text-slate-500 text-sm">Insufficient data to score conviction.</p>
+    {% endif %}
+  </div>
+</div>
+
 {# ---- Chart ---- #}
 <div class="rounded-xl bg-slate-900 border border-slate-800 p-3 mb-5">
   <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
@@ -103,6 +189,73 @@
   <div id="macd-chart" class="w-full" style="height:120px"></div>
   <div id="chart-error" class="text-xs text-rose-400 mt-2 hidden">Chart data unavailable.</div>
 </div>
+
+{# ---- Technical analysis ---- #}
+{% if t and t.available %}
+<div class="rounded-xl bg-slate-900 border border-slate-800 p-4 mb-5">
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="text-sm font-semibold text-slate-300">Technical analysis</h2>
+    <span class="text-[11px] px-2 py-0.5 rounded border {{ tone_chip.get(t.trend_tone, tone_chip.neutral) }}">{{ t.trend_label }}</span>
+  </div>
+  <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-x-4 gap-y-3 text-sm">
+    <div>
+      <div class="text-xs text-slate-400">RSI (14)</div>
+      <div class="font-semibold tabular-nums">{{ m.num(t.rsi, 0) }}
+        <span class="text-xs font-normal {{ tone_text.get(t.rsi_tone, 'text-slate-400') }}">{{ t.rsi_label }}</span>
+      </div>
+    </div>
+    <div>
+      <div class="text-xs text-slate-400">MACD</div>
+      <div class="font-semibold text-xs {{ tone_text.get(t.macd_tone, 'text-slate-400') }}">{{ t.macd_label }}</div>
+    </div>
+    <div>
+      <div class="text-xs text-slate-400">Trend strength (ADX)</div>
+      <div class="font-semibold tabular-nums">{{ m.num(t.adx, 0) }}
+        <span class="text-xs font-normal text-slate-400">{{ t.trend_strength }}</span>
+      </div>
+    </div>
+    <div>
+      <div class="text-xs text-slate-400">Volume</div>
+      <div class="font-semibold text-xs text-slate-300">{{ t.vol_label }}</div>
+    </div>
+    <div>
+      <div class="text-xs text-slate-400">vs 50-EMA</div>
+      <div class="font-semibold tabular-nums">{{ m.num(t.ema50) }}</div>
+    </div>
+    <div>
+      <div class="text-xs text-slate-400">vs 200-EMA</div>
+      <div class="font-semibold tabular-nums">{{ m.num(t.ema200) }}</div>
+    </div>
+    <div>
+      <div class="text-xs text-slate-400">Daily ATR</div>
+      <div class="font-semibold tabular-nums">{{ m.pct(t.atr_pct) }}</div>
+    </div>
+    <div>
+      <div class="text-xs text-slate-400">Support / Resistance</div>
+      <div class="font-semibold tabular-nums text-xs">{{ m.num(t.support) }} / {{ m.num(t.resistance) }}</div>
+    </div>
+    <div>
+      <div class="text-xs text-slate-400">52-week range</div>
+      <div class="font-semibold tabular-nums text-xs">{{ m.num(t.lo_52w) }} &ndash; {{ m.num(t.hi_52w) }}</div>
+    </div>
+    <div>
+      <div class="text-xs text-slate-400">From 52w high</div>
+      <div class="font-semibold tabular-nums">{{ m.pct(t.pct_from_52w_high) }}</div>
+    </div>
+    <div>
+      <div class="text-xs text-slate-400">20-day return</div>
+      <div class="font-semibold tabular-nums">{{ m.pct(t.ret_20d) }}</div>
+    </div>
+    <div>
+      <div class="text-xs text-slate-400">60-day return</div>
+      <div class="font-semibold tabular-nums">{{ m.pct(t.ret_60d) }}</div>
+    </div>
+  </div>
+  {% if d.analysis_source == 'live' %}
+  <p class="text-[11px] text-slate-600 mt-3">Live on-demand fetch (outside the daily universe) &middot; cached briefly.</p>
+  {% endif %}
+</div>
+{% endif %}
 
 {# ---- Verdict confidence + Fundamentals ---- #}
 <div class="grid grid-cols-1 md:grid-cols-2 gap-5">

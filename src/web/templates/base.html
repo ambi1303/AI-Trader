@@ -36,6 +36,19 @@
           </form>
         </div>
       </nav>
+      <div class="max-w-5xl mx-auto px-4 pb-3">
+        <div class="relative" id="stock-search-wrap">
+          <input id="stock-search" type="text" autocomplete="off" spellcheck="false"
+                 placeholder="Search any NSE stock — e.g. TCS, RELIANCE, DMART…"
+                 aria-label="Search stocks"
+                 class="w-full bg-slate-800/70 border border-slate-700 rounded-lg px-3 py-2 text-sm
+                        text-slate-100 placeholder-slate-500 focus:outline-none
+                        focus:ring-2 focus:ring-emerald-600 focus:border-emerald-600" />
+          <div id="stock-search-results"
+               class="absolute z-30 mt-1 w-full bg-slate-900 border border-slate-700 rounded-lg
+                      shadow-xl overflow-hidden hidden"></div>
+        </div>
+      </div>
     </header>
     {% endif %}
 
@@ -47,5 +60,9 @@
       Read-only dashboard &middot; data source: SQLite
     </footer>
   </div>
+  {% if request.url.path != "/login" %}
+  <script src="/static/search.js" defer></script>
+  {% endif %}
+  {% block scripts %}{% endblock %}
 </body>
 </html>

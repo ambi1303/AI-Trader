@@ -310,6 +310,15 @@ def create_app() -> FastAPI:
             request, "stock.html", {"d": detail, "user": user, "symbol": sym},
         )
 
+    @app.get("/api/search", include_in_schema=False)
+    async def api_search(term: str = "",
+                         user: str = Depends(require_user)) -> JSONResponse:
+        term = (term or "").strip()[:20]
+        if not term:
+            return JSONResponse({"results": []})
+        results = await run_in_threadpool(q.search_symbols, term, 8)
+        return JSONResponse({"results": results})
+
     @app.get("/api/ohlc/{symbol}", include_in_schema=False)
     async def api_ohlc(symbol: str,
                        user: str = Depends(require_user)) -> JSONResponse:

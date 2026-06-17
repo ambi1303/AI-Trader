@@ -97,17 +97,32 @@ def _num(x) -> float | None:
 
 
 def _norm_ratio_pct(x) -> float | None:
-    """Normalise a value that yfinance sometimes reports as a percent.
+    """Normalise debtToEquity, which yfinance reports as a percent.
 
-    debtToEquity is commonly reported as e.g. ``45.3`` (meaning 45.3%).
-    dividendYield has flip-flopped between fraction (0.012) and percent
-    (1.2) across yfinance versions. We treat anything > 1.5 as a percent
-    and divide by 100 so everything is a fraction downstream.
+    debtToEquity is commonly reported as e.g. ``45.3`` (meaning a 0.45 ratio).
+    We treat anything > 1.5 as a percent and divide by 100 so it is a clean
+    ratio/fraction downstream. (Real D/E ratios below 1.5 are left as-is.)
     """
     v = _num(x)
     if v is None:
         return None
     return v / 100.0 if v > 1.5 else v
+
+
+def _div_yield_to_fraction(x) -> float | None:
+    """Convert yfinance's dividendYield to a fraction (consistent with roe/margin).
+
+    yfinance reports dividendYield as a PERCENT number, unlike roe/profitMargins
+    which come as fractions. Verified against yfinance 0.2.59:
+        HDFCBANK -> 1.66 (1.66%), RELIANCE -> 0.45 (0.45%), ITC -> 5.49 (5.49%).
+    So we always divide by 100 to store a fraction; the UI then multiplies every
+    ratio by 100 uniformly. The old >1.5 heuristic mis-handled sub-1.5% yields
+    (e.g. RELIANCE 0.45 became 45%).
+    """
+    v = _num(x)
+    if v is None:
+        return None
+    return v / 100.0
 
 
 def _build_session():
@@ -193,7 +208,7 @@ def fetch_snapshot(symbol: str, info: dict) -> FundamentalSnapshot:
         earnings_growth=_num(
             info.get("earningsGrowth") or info.get("earningsQuarterlyGrowth")
         ),
-        dividend_yield=_norm_ratio_pct(info.get("dividendYield")),
+        dividend_yield=_div_yield_to_fraction(info.get("dividendYield")),
         market_cap=_num(info.get("marketCap")),
         eps_ttm=_num(info.get("trailingEps")),
         book_value=_num(info.get("bookValue")),
