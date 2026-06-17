@@ -55,6 +55,12 @@ optuna==4.0.0
 # small and is much easier to mock in tests; pyotp generates the rolling
 # 6-digit TOTP from the base32 secret you set up at app registration.
 pyotp==2.9.0
+# websocket-client powers the live LTP stream (Angel One SmartStream WS 2.0).
+# We talk the WS protocol directly (one small, well-maintained lib) rather than
+# pulling the whole smartapi-python SDK, which pins conflicting versions of
+# requests/pyotp/websocket-client. The dashboard's live prices subscribe to
+# tick-by-tick LTP here; REST getLtpData remains only as a cold-start fallback.
+websocket-client==1.8.0
 
 # --- Web dashboard (Phase A: local; later containerised on Oracle Cloud) ---
 # FastAPI + Starlette give us async views, dependency injection, and

@@ -32,7 +32,9 @@
     if (s && symbols.indexOf(s) === -1) symbols.push(s);
   });
 
-  var POLL_OPEN_MS = 10000; // market open: ~10s (matches server cache TTL)
+  // Backend now streams ticks over a WebSocket, so each poll just reads an
+  // in-memory value (no upstream REST call) -> we can refresh faster & cheaply.
+  var POLL_OPEN_MS = 5000;  // market open: ~5s
   var POLL_SHUT_MS = 60000; // market shut: slow probe so it flips to LIVE on open
   var inr = new Intl.NumberFormat("en-IN", {
     minimumFractionDigits: 2,
@@ -97,7 +99,13 @@
     if (badge) {
       if (live) {
         badge.textContent = "● LIVE";
-        badge.title = "Live price, delayed ~10s";
+        // Streamed ticks carry the exchange feed age (lag_s); show it so the
+        // freshness is verifiable rather than a guess.
+        if (qt.lag_s !== null && qt.lag_s !== undefined) {
+          badge.title = "Streaming · ~" + Math.round(qt.lag_s) + "s behind exchange";
+        } else {
+          badge.title = "Live price";
+        }
         badge.className =
           "live-badge inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded border bg-emerald-500/15 text-emerald-300 border-emerald-700";
       } else {
@@ -113,7 +121,7 @@
     statusNodes.forEach(function (el) {
       if (open) {
         el.textContent = "● Market open · LIVE";
-        el.title = "Live prices, delayed ~10s";
+        el.title = "Live streaming prices";
         el.className =
           el.getAttribute("data-base-class") +
           " bg-emerald-500/15 text-emerald-300 border-emerald-700";

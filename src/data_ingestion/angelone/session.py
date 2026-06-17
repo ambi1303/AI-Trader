@@ -158,8 +158,29 @@ class AngelOneSession:
 
     @property
     def feed_token(self) -> str | None:
-        """For websocket clients (we don't open one in this codebase)."""
+        """For websocket clients."""
         return self._feed_token
+
+    def websocket_credentials(self) -> dict[str, str] | None:
+        """Return the four values SmartStream WS 2.0 needs to authenticate.
+
+        Logs in first if necessary so the JWT/feed token are populated.
+        Returns ``None`` only if login could not produce a JWT. The dict is
+        in-memory only and must NEVER be logged or serialised -- every value
+        in it is a credential (the JWT auth_token and feed_token especially).
+        """
+        if not self.is_authenticated:
+            self.login()
+        if not self._jwt or not self._feed_token:
+            return None
+        # WS Authorization header takes the raw JWT (no "Bearer " prefix);
+        # this matches Angel One's reference client. REST uses the Bearer form.
+        return {
+            "auth_token": self._jwt,
+            "feed_token": self._feed_token,
+            "api_key": self._creds.api_key,
+            "client_code": self._creds.client_code,
+        }
 
     @property
     def allows_orders(self) -> bool:

@@ -1,18 +1,25 @@
 """Near-real-time last-traded-price (LTP) service for the dashboard.
 
-Wraps the read-only Angel One LTP endpoint (``src/data_ingestion/angelone``)
-behind a tiny, dashboard-friendly service that:
+Serves the dashboard a near-real-time last-traded price with three tiers,
+tried in order so freshness degrades gracefully:
 
-* gates fetching to NSE market hours (IST, weekdays, non-holidays) so we
-  don't spend API calls when nothing is moving;
-* re-uses a single logged-in Angel One session across requests (login is
-  expensive and rate-limited) and transparently re-logs in if it drops;
-* caches each symbol's quote for a few seconds so repeated polls from the
-  browser collapse into at most one upstream call per ``_CACHE_TTL_S``.
+1. **SmartStream WebSocket** (``src/web/ws_feed.py``) -- genuine tick-by-tick
+   LTP pushed by Angel One. This is the primary source during market hours and
+   the reason the price is no longer minutes behind: REST ``getLtpData`` is a
+   snapshot endpoint and trails the live market, whereas the WS streams ticks.
+2. **REST ``getLtpData``** (``src/data_ingestion/angelone``) -- used only as a
+   cold-start fallback for the first poll or two while the WS connects/subscribes.
+3. **Last EOD close** from the DB -- when the market is closed or credentials /
+   instruments are unavailable.
 
-It is READ-ONLY and never places orders. When the market is closed, or
-credentials/instruments are unavailable, it returns ``market_open=False``
-(or ``ltp=None``) and the UI falls back to the last EOD close from the DB.
+It also:
+* gates fetching to NSE market hours (IST, weekdays, non-holidays);
+* re-uses a single logged-in Angel One session (login is expensive + rate
+  limited) and transparently re-logs in if it drops;
+* caches the REST fallback for a few seconds so browser polls collapse into at
+  most one upstream call per ``_CACHE_TTL_S``.
+
+It is READ-ONLY and never places orders.
 """
 
 from __future__ import annotations
@@ -94,6 +101,52 @@ def _drop_session() -> None:
     _session = None
 
 
+def _ensure_feed():
+    """Start the SmartStream WS feed once (lazily). Caller holds _lock.
+
+    Returns the running :class:`LiveFeed` or ``None`` if it can't start (no
+    creds, websocket-client missing, login failure) -- in which case the caller
+    transparently falls back to REST.
+    """
+    from src.web.ws_feed import get_feed
+    feed = get_feed()
+    if feed.started:
+        return feed
+    session = _get_session()
+    if session is None:
+        return None
+    try:
+        creds = session.websocket_credentials()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("WS credential/login failed; staying on REST: {}", exc)
+        return None
+    if not creds:
+        return None
+    return feed if feed.start(creds, _instruments or []) else None
+
+
+def _stream_payload(sym: str, prev_close: float | None):
+    """Try to build a payload from a fresh streamed tick. Caller holds _lock.
+
+    Returns a payload dict on a fresh tick, else ``None`` (REST fallback).
+    """
+    feed = _ensure_feed()
+    if feed is None:
+        return None
+    feed.ensure_subscribed([sym])
+    got = feed.get_ltp(sym)
+    if got is None:
+        return None
+    ltp, age_s = got
+    payload = _payload(
+        sym, market_open=True, ltp=ltp, prev_close=prev_close,
+        as_of=ist_now().date().isoformat(), source="angelone-stream",
+    )
+    # Surface true data age (exchange-feed seconds) so the UI can prove freshness.
+    payload["lag_s"] = round(age_s, 1)
+    return payload
+
+
 def _last_eod_close(symbol: str) -> tuple[float | None, str | None]:
     """Most recent stored close + its date, used as the closed-market fallback."""
     row = fetch_one(
@@ -151,6 +204,13 @@ def get_live_quote(symbol: str) -> dict[str, Any]:
 
     now = time.monotonic()
     with _lock:
+        # Tier 1: live WebSocket tick (primary during market hours).
+        streamed = _stream_payload(sym, prev_close)
+        if streamed is not None:
+            _quote_cache[sym] = (now, streamed)
+            return streamed
+
+        # Tier 2: REST snapshot (cold-start fallback while the WS warms up).
         cached = _quote_cache.get(sym)
         if cached and (now - cached[0]) < _CACHE_TTL_S:
             return cached[1]
@@ -193,9 +253,15 @@ def get_live_quote(symbol: str) -> dict[str, Any]:
 
 def get_live_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
     """Batch helper for the dashboard. Returns {symbol: payload}."""
+    syms = [s for s in ((x or "").upper().strip() for x in symbols) if s]
+    # Subscribe the whole batch in a single WS message up front (instead of one
+    # subscribe per symbol) so a freshly-opened dashboard goes live in one round.
+    if syms and is_market_open():
+        with _lock:
+            feed = _ensure_feed()
+            if feed is not None:
+                feed.ensure_subscribed(syms)
     out: dict[str, dict[str, Any]] = {}
-    for s in symbols:
-        sym = (s or "").upper().strip()
-        if sym:
-            out[sym] = get_live_quote(sym)
+    for sym in syms:
+        out[sym] = get_live_quote(sym)
     return out
