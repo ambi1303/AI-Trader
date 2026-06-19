@@ -84,7 +84,7 @@ def test_orchestrator_records_failures_in_validation_table(
     monkeypatch.setattr("scripts.run_daily.generate_signals", _boom)
 
     rc = run_daily.main([
-        "--dry-run",
+        "--dry-run", "--signal-engine", "ml",
         "--skip-ingest", "--skip-features", "--skip-predict",
         "--skip-reconcile",
     ])

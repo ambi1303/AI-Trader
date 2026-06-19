@@ -33,7 +33,10 @@
               data-live-symbol="{{ p.symbol }}"
               data-entry="{{ p.entry_price }}"
               data-qty="{{ p.qty }}">
-            <td class="px-4 py-2 font-medium">{{ p.symbol }}</td>
+            <td class="px-4 py-2 font-medium">
+              <a href="/stock/{{ p.symbol }}" class="hover:text-emerald-300"
+                 title="See the analysis &amp; rationale for {{ p.symbol }}">{{ p.symbol }}</a>
+            </td>
             <td class="px-4 py-2 hidden sm:table-cell text-slate-400">{{ p.sector }}</td>
             <td class="px-4 py-2 text-right tabular-nums">{{ p.qty }}</td>
             <td class="px-4 py-2 text-right tabular-nums">{{ m.num(p.entry_price) }}</td>
@@ -76,7 +79,9 @@
         <tbody class="divide-y divide-slate-800">
           {% for t in closed %}
           <tr class="hover:bg-slate-800/40">
-            <td class="px-4 py-2 font-medium">{{ t.symbol }}</td>
+            <td class="px-4 py-2 font-medium">
+              <a href="/stock/{{ t.symbol }}" class="hover:text-emerald-300">{{ t.symbol }}</a>
+            </td>
             <td class="px-4 py-2 hidden sm:table-cell tabular-nums text-slate-400">{{ t.entry_date }}</td>
             <td class="px-4 py-2 tabular-nums">{{ t.exit_date }}</td>
             <td class="px-4 py-2 text-right tabular-nums">{{ t.qty }}</td>

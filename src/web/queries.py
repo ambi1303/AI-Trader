@@ -567,6 +567,40 @@ def get_latest_fundamentals(symbol: str) -> dict[str, Any] | None:
     return row
 
 
+def build_portfolio_health(as_of: str | None = None) -> dict[str, Any]:
+    """Concentration / diversification / VaR for the current open positions.
+
+    Pulls open paper positions (current price + sector) and the latest daily
+    volatility per held name, then delegates to the pure ``risk`` engine.
+    """
+    from src.analysis import risk
+
+    positions = get_open_positions(as_of)
+    pos = [
+        {"symbol": p.symbol, "sector": p.sector, "qty": p.qty,
+         "price": (p.last_close if p.last_close is not None else p.entry_price)}
+        for p in positions
+    ]
+    vol_map: dict[str, float] = {}
+    syms = [p["symbol"] for p in pos]
+    if syms:
+        placeholders = ",".join(["?"] * len(syms))
+        rows = _safe_fetch(
+            f"""
+            SELECT fd.symbol, fd.vol_20d
+            FROM   feature_data fd
+            JOIN  (SELECT symbol, MAX(feature_date) AS md
+                   FROM feature_data WHERE symbol IN ({placeholders})
+                   GROUP BY symbol) x
+              ON  x.symbol = fd.symbol AND x.md = fd.feature_date
+            """,
+            tuple(syms),
+        )
+        vol_map = {r["symbol"]: r["vol_20d"]
+                   for r in rows if r.get("vol_20d") is not None}
+    return risk.portfolio_health(pos, vol_map)
+
+
 def search_symbols(term: str, limit: int = 8) -> list[str]:
     """Symbol autocomplete over the analyzable price universe.
 
@@ -591,6 +625,112 @@ def search_symbols(term: str, limit: int = 8) -> list[str]:
         (prefix, contains, prefix, int(limit)),
     )
     return [r["symbol"] for r in rows]
+
+
+def get_news_for_symbol(
+    symbol: str, *, limit: int = 8, refresh: bool = True
+) -> list[dict[str, Any]]:
+    """Latest stored headlines for a symbol, newest first, each tagged with a
+    ``category`` (``"M&A"`` / ``"Corporate action"`` / ``None``).
+
+    When ``refresh`` is set we first kick a throttled, best-effort live fetch
+    (Google News RSS) so even stocks outside the daily universe get fresh news
+    on demand. The fetch is TTL-guarded inside ``news_scraper`` and never
+    raises into the page.
+    """
+    sym = symbol.upper()
+    if refresh:
+        try:
+            from src.data_ingestion import news_scraper
+            news_scraper.refresh_symbol_news(sym)
+        except Exception as exc:  # noqa: BLE001 -- news is non-critical
+            log.warning("news refresh skipped for {}: {}", sym, exc)
+
+    rows = _safe_fetch(
+        """
+        SELECT published_at, source, title, url
+        FROM   news_headlines
+        WHERE  symbol = ?
+        ORDER  BY published_at DESC
+        LIMIT  ?
+        """,
+        (sym, int(limit)),
+    )
+
+    try:
+        from src.data_ingestion.news_scraper import classify_headline
+    except Exception:  # noqa: BLE001
+        def classify_headline(_t: str):  # type: ignore[misc]
+            return None
+
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        publisher = (r.get("source") or "").split(":", 1)[-1] or "news"
+        out.append({
+            "title": r.get("title"),
+            "url": r.get("url"),
+            "published_at": r.get("published_at"),
+            "published_date": (r.get("published_at") or "")[:10],
+            "publisher": publisher,
+            "category": classify_headline(r.get("title") or ""),
+        })
+    return out
+
+
+def get_feasibility_inputs(symbol: str) -> dict[str, Any] | None:
+    """Latest daily volatility / momentum / ATR% for the profit-feasibility
+    tool. Uses stored features for universe names (instant); falls back to
+    computing from on-demand price history so ANY NSE stock works.
+    """
+    sym = symbol.upper()
+    row = _safe_fetch_one(
+        "SELECT close, vol_20d, mom_20d, mom_60d, atr_pct FROM feature_data "
+        "WHERE symbol = ? ORDER BY feature_date DESC LIMIT 1",
+        (sym,),
+    )
+    if row and row.get("vol_20d"):
+        return {
+            "last_close": row.get("close"),
+            "daily_vol": row.get("vol_20d"),
+            "mom_20d": row.get("mom_20d"),
+            "mom_60d": row.get("mom_60d"),
+            "atr_pct": row.get("atr_pct"),
+        }
+
+    # Fallback: compute directly from price history (covers any NSE stock).
+    try:
+        import math
+
+        from src.analysis import datasource
+        from src.features import statistical_features as sf
+        from src.features import technical_indicators as ti
+
+        df, _f, _src = datasource.get_price_and_fundamentals(sym, None)
+        if df is None or df.empty or len(df) < 25:
+            return None
+        close = df["close"].astype("float64")
+        high = df["high"].astype("float64")
+        low = df["low"].astype("float64")
+
+        def _last(series) -> float | None:
+            try:
+                v = float(series.iloc[-1])
+                return v if not math.isnan(v) else None
+            except Exception:  # noqa: BLE001
+                return None
+
+        last_close = _last(close)
+        atr = _last(ti.atr(high, low, close, 14))
+        return {
+            "last_close": last_close,
+            "daily_vol": _last(sf.realized_vol(close, 20)),
+            "mom_20d": _last(sf.momentum(close, 20)),
+            "mom_60d": _last(sf.momentum(close, 60)) if len(df) > 60 else None,
+            "atr_pct": (atr / last_close) if (atr and last_close) else None,
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("feasibility inputs failed for {}: {}", sym, exc)
+        return None
 
 
 def get_stock_detail(symbol: str, as_of: str | None = None) -> dict[str, Any]:
@@ -697,6 +837,15 @@ def get_stock_detail(symbol: str, as_of: str | None = None) -> dict[str, Any]:
         }
     detail["round_trip_cost_pct"] = assess.round_trip_cost_pct()
     detail["is_marginal"] = assess.is_marginal_move(upside_pct)
+
+    # ---- Latest news + merger/demerger flags (best-effort) ---------------
+    try:
+        news = get_news_for_symbol(sym, limit=8)
+    except Exception as exc:  # noqa: BLE001 -- never break the page on news
+        log.warning("news bundle failed for {}: {}", sym, exc)
+        news = []
+    detail["news"] = news
+    detail["corporate_events"] = [n for n in news if n.get("category") == "M&A"]
     return detail
 
 

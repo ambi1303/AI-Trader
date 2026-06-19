@@ -27,12 +27,27 @@ class RiskConfig:
     max_concurrent_positions: int = 8
     max_per_sector: int = 3                  # positions per sector
     cooldown_days_after_loss: int = 1        # don't re-enter same symbol immediately
+    # Minimum profit target as a % of entry. The take-profit is floored at
+    # entry*(1+min_profit_pct/100) so low-volatility names still aim for a
+    # worthwhile gain. Default 0 = pure ATR target (keeps backtests unchanged);
+    # the live strategy sets this to 5%.
+    min_profit_pct: float = 0.0
 
     def stop_for(self, entry_price: float, atr: float) -> float:
         return entry_price - self.stop_atr_mult * atr
 
-    def target_for(self, entry_price: float, atr: float) -> float:
-        return entry_price + self.take_profit_atr_mult * atr
+    def target_for(self, entry_price: float, atr: float,
+                   tp_atr_mult: float | None = None) -> float:
+        """Take-profit price. ``tp_atr_mult`` overrides the configured
+        multiple (used to widen the target for high-conviction setups so
+        winners can run well past the minimum). The result is still floored
+        at ``min_profit_pct`` so weak setups keep a worthwhile target."""
+        mult = self.take_profit_atr_mult if tp_atr_mult is None else tp_atr_mult
+        atr_target = entry_price + mult * atr
+        if self.min_profit_pct > 0:
+            floor = entry_price * (1.0 + self.min_profit_pct / 100.0)
+            return max(atr_target, floor)
+        return atr_target
 
 
 # ---------------------------------------------------------------------------

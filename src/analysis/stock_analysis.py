@@ -428,12 +428,16 @@ def _score_risk(t: dict[str, Any]) -> tuple[float | None, str | None]:
 
 
 def buy_sell_zones(last_close: float | None,
-                   technicals: dict[str, Any] | None) -> dict[str, Any]:
+                   technicals: dict[str, Any] | None,
+                   min_profit_pct: float = 5.0) -> dict[str, Any]:
     """Volatility-based entry/target/stop bands and risk:reward.
 
     Uses ATR (true daily range) so the zones scale with the stock's own
     volatility instead of arbitrary fixed percentages. Falls back to a 2%
     band if ATR is unavailable.
+
+    ``min_profit_pct`` floors the first target so it always represents at
+    least that much gain over the current price (default +5%).
     """
     if not last_close or last_close <= 0:
         return {"available": False}
@@ -455,9 +459,14 @@ def buy_sell_zones(last_close: float | None,
         stop = atr_stop
     risk = max(last_close - stop, 0.01)
 
-    # Targets as R-multiples of risk -> R:R is good by construction (1.5 / 3.0).
+    # Targets as R-multiples of risk -> R:R is good by construction (1.5 / 3.0),
+    # but floored so target 1 always clears the minimum profit goal (>= +5%)
+    # and target 2 is at least double that.
     target1 = last_close + 1.5 * risk
     target2 = last_close + 3.0 * risk
+    if min_profit_pct and min_profit_pct > 0:
+        target1 = max(target1, last_close * (1.0 + min_profit_pct / 100.0))
+        target2 = max(target2, last_close * (1.0 + 2.0 * min_profit_pct / 100.0))
 
     # Entry bands.
     buy_low = last_close - 0.4 * atr
@@ -481,6 +490,10 @@ def buy_sell_zones(last_close: float | None,
         "stop": round(stop, 2),
         "target1": round(target1, 2),
         "target2": round(target2, 2),
+        "target1_pct": round((target1 / last_close - 1.0) * 100.0, 2),
+        "target2_pct": round((target2 / last_close - 1.0) * 100.0, 2),
+        "stop_pct": round((stop / last_close - 1.0) * 100.0, 2),
+        "min_profit_pct": round(float(min_profit_pct), 1),
         "risk_reward": round(rr, 2),
     }
 

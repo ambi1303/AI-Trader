@@ -1,134 +1,87 @@
-"""Tests for the risk overlay logic."""
+"""Unit tests for the risk-management engine (pure functions)."""
 
 from __future__ import annotations
 
-from src.backtesting.risk import (
-    OpenPosition,
-    RiskConfig,
-    can_open_new_position,
-    check_stop_or_target,
-)
+from src.analysis import risk
 
 
-def _pos(stop=95.0, target=110.0, entry=100.0) -> OpenPosition:
-    return OpenPosition(
-        symbol="X", sector="IT", side="LONG", qty=10,
-        entry_date="2024-01-01", entry_price=entry, atr_at_entry=2.5,
-        stop=stop, target=target, high_watermark=entry,
-        entry_prob=0.6, threshold=0.55,
-    )
+# ---- position sizing ------------------------------------------------------
 
 
-# ---------------------------------------------------------------------------
-# Stop / target hit logic
-# ---------------------------------------------------------------------------
+def test_position_size_standard_case() -> None:
+    r = risk.position_size(100_000, 2, 1000, 950, target=1150)
+    assert r["valid"] is True
+    assert r["shares"] == 40                 # 2000 budget / 50 risk/share
+    assert r["risk_amount"] == 2000.0
+    assert r["risk_pct_actual"] == 2.0
+    assert r["position_value"] == 40_000.0
+    assert r["risk_reward"] == 3.0           # (1150-1000)/(1000-950)
 
 
-def test_gap_down_below_stop_fills_at_open():
-    p = _pos(stop=95.0)
-    hr = check_stop_or_target(p, bar_open=90.0, bar_high=92.0,
-                              bar_low=89.0, bar_close=91.0)
-    assert hr.hit and hr.reason == "stop"
-    assert hr.fill_price == 90.0
+def test_position_size_rejects_stop_above_entry() -> None:
+    r = risk.position_size(100_000, 2, 1000, 1050)
+    assert r["valid"] is False
+    assert any("below the entry" in n for n in r["notes"])
 
 
-def test_gap_up_through_target_fills_at_open():
-    p = _pos(target=110.0)
-    hr = check_stop_or_target(p, bar_open=115.0, bar_high=116.0,
-                              bar_low=114.0, bar_close=115.5)
-    assert hr.hit and hr.reason == "target"
-    assert hr.fill_price == 115.0
+def test_position_size_capped_by_capital_on_tight_stop() -> None:
+    r = risk.position_size(100_000, 2, 1000, 998)
+    assert r["valid"] is True
+    assert r["shares"] == 100                # capital cap: 100000/1000
+    assert r["risk_pct_actual"] < 2.0        # full budget not deployed
+    assert any("tight" in n.lower() for n in r["notes"])
 
 
-def test_only_stop_in_range_exits_at_stop():
-    p = _pos(stop=95.0, target=120.0)
-    hr = check_stop_or_target(p, bar_open=100.0, bar_high=102.0,
-                              bar_low=94.0, bar_close=98.0)
-    assert hr.hit and hr.reason == "stop"
-    assert hr.fill_price == 95.0
+def test_position_size_lot_rounding() -> None:
+    r = risk.position_size(100_000, 2, 1000, 950, lot_size=25)
+    assert r["shares"] % 25 == 0
+    assert r["shares"] == 25                  # 40 floored to nearest 25
 
 
-def test_only_target_in_range_exits_at_target():
-    p = _pos(stop=80.0, target=110.0)
-    hr = check_stop_or_target(p, bar_open=100.0, bar_high=112.0,
-                              bar_low=99.0, bar_close=108.0)
-    assert hr.hit and hr.reason == "target"
-    assert hr.fill_price == 110.0
+def test_position_size_missing_inputs_is_invalid() -> None:
+    assert risk.position_size(0, 2, 1000, 950)["valid"] is False
 
 
-def test_both_in_range_assumes_stop_first_pessimistic():
-    p = _pos(stop=95.0, target=110.0)
-    hr = check_stop_or_target(p, bar_open=100.0, bar_high=112.0,
-                              bar_low=94.0, bar_close=108.0)
-    assert hr.hit and hr.reason == "stop"
-    assert hr.fill_price == 95.0
+# ---- portfolio health -----------------------------------------------------
 
 
-def test_no_hit_returns_close():
-    p = _pos(stop=80.0, target=120.0)
-    hr = check_stop_or_target(p, bar_open=100.0, bar_high=105.0,
-                              bar_low=98.0, bar_close=103.0)
-    assert not hr.hit
-    assert hr.fill_price == 103.0
+def test_portfolio_health_empty() -> None:
+    assert risk.portfolio_health([]) == {"has_positions": False}
 
 
-# ---------------------------------------------------------------------------
-# Trailing stop
-# ---------------------------------------------------------------------------
+def test_portfolio_health_flags_single_name_concentration() -> None:
+    positions = [{"symbol": "TCS", "sector": "IT", "qty": 100, "price": 4000}]
+    h = risk.portfolio_health(positions, {"TCS": 0.02})
+    assert h["has_positions"] is True
+    assert h["n_positions"] == 1
+    assert h["max_position"]["weight_pct"] == 100.0
+    # Single name + one sector + too few names -> low diversification.
+    assert h["diversification_score"] < 50
+    texts = " ".join(w["text"] for w in h["warnings"]).lower()
+    assert "concentration" in texts or "diversification" in texts
+    assert h["var_95_1d_rupees"] > 0
 
 
-def test_trailing_stop_only_ratchets_up():
-    cfg = RiskConfig(use_trailing_stop=True, trail_atr_mult=2.0)
-    p = _pos(stop=95.0)
-    p.update_trailing_stop(today_high=110.0, cfg=cfg)  # raise stop
-    new_stop_after_high = p.stop
-    assert new_stop_after_high > 95.0
-
-    p.update_trailing_stop(today_high=100.0, cfg=cfg)  # should NOT lower
-    assert p.stop == new_stop_after_high
-
-
-def test_trailing_stop_disabled_does_nothing():
-    cfg = RiskConfig(use_trailing_stop=False)
-    p = _pos(stop=95.0)
-    p.update_trailing_stop(today_high=200.0, cfg=cfg)
-    assert p.stop == 95.0
-
-
-# ---------------------------------------------------------------------------
-# Portfolio-level guards
-# ---------------------------------------------------------------------------
+def test_portfolio_health_balanced_scores_well() -> None:
+    positions = [
+        {"symbol": "TCS", "sector": "IT", "qty": 10, "price": 4000},      # 40k
+        {"symbol": "HDFCBANK", "sector": "BANK", "qty": 20, "price": 1500},  # 30k
+        {"symbol": "SUNPHARMA", "sector": "PHARMA", "qty": 30, "price": 1000},  # 30k
+        {"symbol": "ITC", "sector": "FMCG", "qty": 80, "price": 400},      # 32k
+        {"symbol": "MARUTI", "sector": "AUTO", "qty": 3, "price": 11000},  # 33k
+    ]
+    vols = {p["symbol"]: 0.015 for p in positions}
+    h = risk.portfolio_health(positions, vols)
+    assert h["n_positions"] == 5
+    assert h["max_position"]["weight_pct"] <= 30
+    assert h["top_sector"]["weight_pct"] <= 40
+    assert h["diversification_score"] >= 80
+    # Sectors sum to ~100%.
+    assert abs(sum(s["weight_pct"] for s in h["sectors"]) - 100.0) < 1.0
 
 
-def test_max_concurrent_positions_blocks_new_entry():
-    cfg = RiskConfig(max_concurrent_positions=2)
-    open_ = [_pos(), _pos()]
-    allowed, reason = can_open_new_position(
-        cfg=cfg, open_positions=open_, sector="IT", today_pnl_pct=0.0,
-    )
-    assert not allowed and reason == "max_concurrent_positions"
-
-
-def test_max_per_sector_blocks_concentration():
-    cfg = RiskConfig(max_concurrent_positions=10, max_per_sector=2)
-    open_ = [_pos(), _pos()]  # two IT positions
-    allowed, reason = can_open_new_position(
-        cfg=cfg, open_positions=open_, sector="IT", today_pnl_pct=0.0,
-    )
-    assert not allowed and reason == "max_per_sector"
-
-
-def test_daily_loss_limit_halts_entries():
-    cfg = RiskConfig(daily_loss_limit_pct=0.03)
-    allowed, reason = can_open_new_position(
-        cfg=cfg, open_positions=[], sector="IT", today_pnl_pct=-0.04,
-    )
-    assert not allowed and reason == "daily_loss_limit"
-
-
-def test_all_clear_returns_ok():
-    cfg = RiskConfig()
-    allowed, reason = can_open_new_position(
-        cfg=cfg, open_positions=[], sector="IT", today_pnl_pct=0.0,
-    )
-    assert allowed and reason == "ok"
+def test_portfolio_var_scales_with_volatility() -> None:
+    pos = [{"symbol": "X", "sector": "Z", "qty": 10, "price": 1000}]  # 10k
+    low = risk.portfolio_health(pos, {"X": 0.01})["var_95_1d_rupees"]
+    high = risk.portfolio_health(pos, {"X": 0.04})["var_95_1d_rupees"]
+    assert high > low

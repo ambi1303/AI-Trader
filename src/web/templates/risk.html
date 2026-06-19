@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Risk &middot; AI Trader{% endblock %}
+
+{% block content %}
+<div class="mb-4">
+  <h1 class="text-2xl font-bold tracking-tight">Risk Management</h1>
+  <p class="text-sm text-slate-400 mt-1">
+    Size positions to a fixed risk budget and check your portfolio for
+    concentration. Analytical view, not advice.
+  </p>
+</div>
+
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+
+  {# ---- Position sizing calculator ---- #}
+  <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
+    <h2 class="text-sm font-semibold text-slate-300 mb-3">Position size calculator</h2>
+    <div class="grid grid-cols-2 gap-3 text-sm">
+      <label class="block">
+        <span class="text-xs text-slate-400">Capital (&#8377;)</span>
+        <input id="rs-capital" type="number" inputmode="decimal" value="100000"
+               class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-100" />
+      </label>
+      <label class="block">
+        <span class="text-xs text-slate-400">Risk per trade (%)</span>
+        <input id="rs-risk" type="number" inputmode="decimal" value="2" step="0.1"
+               class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-100" />
+      </label>
+      <label class="block">
+        <span class="text-xs text-slate-400">Entry price (&#8377;)</span>
+        <input id="rs-entry" type="number" inputmode="decimal" value="1000"
+               class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-100" />
+      </label>
+      <label class="block">
+        <span class="text-xs text-slate-400">Stop loss (&#8377;)</span>
+        <input id="rs-stop" type="number" inputmode="decimal" value="950"
+               class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-100" />
+      </label>
+      <label class="block">
+        <span class="text-xs text-slate-400">Target (optional)</span>
+        <input id="rs-target" type="number" inputmode="decimal" value=""
+               class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-100" />
+      </label>
+      <label class="block">
+        <span class="text-xs text-slate-400">Lot size</span>
+        <input id="rs-lot" type="number" inputmode="numeric" value="1" min="1"
+               class="mt-1 w-full bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-slate-100" />
+      </label>
+    </div>
+
+    <div id="rs-result" class="mt-4 grid grid-cols-2 gap-3 text-sm">
+      <div class="rounded-lg bg-slate-800/50 p-3">
+        <div class="text-xs text-slate-400">Buy quantity</div>
+        <div id="rs-shares" class="text-2xl font-bold text-emerald-300 tabular-nums">&mdash;</div>
+      </div>
+      <div class="rounded-lg bg-slate-800/50 p-3">
+        <div class="text-xs text-slate-400">Position value</div>
+        <div id="rs-value" class="text-lg font-semibold tabular-nums">&mdash;</div>
+        <div id="rs-pct" class="text-xs text-slate-500"></div>
+      </div>
+      <div class="rounded-lg bg-slate-800/50 p-3">
+        <div class="text-xs text-slate-400">Amount at risk</div>
+        <div id="rs-risk-amt" class="text-lg font-semibold text-rose-300 tabular-nums">&mdash;</div>
+        <div id="rs-risk-pct" class="text-xs text-slate-500"></div>
+      </div>
+      <div class="rounded-lg bg-slate-800/50 p-3">
+        <div class="text-xs text-slate-400">Risk : Reward</div>
+        <div id="rs-rr" class="text-lg font-semibold tabular-nums">&mdash;</div>
+      </div>
+    </div>
+    <p id="rs-notes" class="text-xs text-amber-300/90 mt-3"></p>
+    <p class="text-[11px] text-slate-600 mt-1">
+      Fixed-fractional sizing: shares = (capital &times; risk%) &divide; (entry &minus; stop),
+      floored to lot size and capped by capital.
+    </p>
+  </div>
+
+  {# ---- Portfolio health ---- #}
+  <div class="rounded-xl bg-slate-900 border border-slate-800 p-4">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="text-sm font-semibold text-slate-300">Portfolio health</h2>
+      {% if health.has_positions %}
+      <span class="text-[11px] text-slate-500">{{ health.n_positions }} open &middot; &#8377;{{ "{:,.0f}".format(health.total_value) }}</span>
+      {% endif %}
+    </div>
+
+    {% if not health.has_positions %}
+    <p class="text-slate-500 text-sm">No open positions to analyze.</p>
+    {% else %}
+
+    {% set ds = health.diversification_score %}
+    {% set dtone = 'text-emerald-400' if ds >= 70 else ('text-amber-300' if ds >= 45 else 'text-rose-400') %}
+    <div class="flex items-end gap-4 mb-3">
+      <div>
+        <div class="text-xs text-slate-400">Diversification</div>
+        <div class="text-3xl font-bold {{ dtone }}">{{ ds }}<span class="text-sm text-slate-500">/100</span></div>
+      </div>
+      <div>
+        <div class="text-xs text-slate-400" title="Rough worst-case 1-day loss at 95% confidence">Est. 1-day VaR (95%)</div>
+        <div class="text-xl font-semibold text-rose-300 tabular-nums">&#8377;{{ "{:,.0f}".format(health.var_95_1d_rupees) }}</div>
+        <div class="text-xs text-slate-500">~{{ health.var_95_1d_pct }}% of portfolio</div>
+      </div>
+    </div>
+
+    {# Warnings #}
+    <div class="space-y-1.5 mb-3">
+      {% for w in health.warnings %}
+      {% set wc = {'good':'bg-emerald-500/10 border-emerald-800 text-emerald-200',
+                   'ok':'bg-slate-700/30 border-slate-600 text-slate-200',
+                   'warn':'bg-amber-500/10 border-amber-800 text-amber-200'}.get(w.tone, 'bg-slate-800 border-slate-700 text-slate-300') %}
+      <div class="text-xs rounded border px-2.5 py-1.5 {{ wc }}">{{ w.text }}</div>
+      {% endfor %}
+    </div>
+
+    {# Sector weights #}
+    <div class="mb-2 text-xs text-slate-400">Sector exposure</div>
+    <div class="space-y-1.5">
+      {% for sct in health.sectors %}
+      <div>
+        <div class="flex justify-between text-xs">
+          <span class="text-slate-300">{{ sct.sector }}</span>
+          <span class="text-slate-400 tabular-nums">{{ sct.weight_pct }}%</span>
+        </div>
+        <div class="h-1.5 bg-slate-800 rounded mt-1">
+          <div class="h-1.5 rounded {{ 'bg-rose-500' if sct.weight_pct > 40 else 'bg-emerald-500' }}"
+               style="width: {{ sct.weight_pct if sct.weight_pct <= 100 else 100 }}%"></div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+
+    {# Top positions #}
+    <div class="mt-3 mb-2 text-xs text-slate-400">Holdings by weight</div>
+    <div class="space-y-1 text-sm">
+      {% for pos in health.positions %}
+      <div class="flex items-center justify-between border-b border-slate-800/70 pb-1">
+        <a href="/stock/{{ pos.symbol }}" class="text-slate-200 hover:text-emerald-300">{{ pos.symbol }}</a>
+        <span class="text-slate-400 tabular-nums text-xs">{{ pos.weight_pct }}%</span>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<p class="text-xs text-slate-600 mt-6 leading-relaxed">
+  VaR is a rough estimate from recent daily volatility, assuming positions move
+  together (a conservative, correlation&nbsp;=&nbsp;1 simplification) &mdash; treat it as
+  an order-of-magnitude guide, not a guarantee.
+</p>
+
+<script src="/static/risk.js" defer></script>
+{% endblock %}

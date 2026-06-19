@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}Discover &middot; AI Trader{% endblock %}
+
+{% block content %}
+{% set current = (strategies | selectattr("key", "equalto", active) | first) %}
+
+<div class="mb-4">
+  <h1 class="text-2xl font-bold tracking-tight">AI Stock Discovery</h1>
+  <p class="text-sm text-slate-400 mt-1">
+    Screens {{ "{:,}".format(universe_size) }} stocks on the latest stored data and ranks
+    the best fits for each strategy. Free data &mdash; analytical view, not advice.
+  </p>
+</div>
+
+{# ---- Strategy tabs ---- #}
+<div class="flex flex-wrap gap-2 mb-4">
+  {% for s in strategies %}
+  <a href="/discover?strategy={{ s.key }}"
+     class="px-3 py-1.5 rounded-lg text-sm border
+            {% if s.key == active %}bg-emerald-500/15 border-emerald-700 text-emerald-200
+            {% else %}bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800{% endif %}">
+    {{ s.label }}
+  </a>
+  {% endfor %}
+</div>
+
+{% if current %}
+<div class="mb-4 text-sm text-slate-400 bg-slate-900 border border-slate-800 rounded-lg px-3 py-2">
+  <span class="text-slate-200 font-semibold">{{ current.label }}:</span> {{ current.blurb }}
+</div>
+{% endif %}
+
+{# ---- Results ---- #}
+{% if results %}
+<div class="overflow-x-auto rounded-xl border border-slate-800">
+  <table class="w-full text-sm">
+    <thead class="bg-slate-900 text-slate-400 text-xs">
+      <tr>
+        <th class="text-left font-medium px-3 py-2">#</th>
+        <th class="text-left font-medium px-3 py-2">Symbol</th>
+        <th class="text-left font-medium px-3 py-2 hidden sm:table-cell">Sector</th>
+        <th class="text-right font-medium px-3 py-2">Fit</th>
+        <th class="text-right font-medium px-3 py-2">Price</th>
+        <th class="text-right font-medium px-3 py-2 hidden md:table-cell">P/E</th>
+        <th class="text-right font-medium px-3 py-2 hidden md:table-cell">ROE</th>
+        <th class="text-right font-medium px-3 py-2 hidden lg:table-cell">Rev YoY</th>
+        <th class="text-right font-medium px-3 py-2 hidden lg:table-cell">60d</th>
+        <th class="text-right font-medium px-3 py-2 hidden sm:table-cell">RSI</th>
+        <th class="text-right font-medium px-3 py-2">Model</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-slate-800">
+      {% for r in results %}
+      {% set fc = 'text-emerald-300' if r.score >= 70 else ('text-amber-300' if r.score >= 50 else 'text-slate-300') %}
+      <tr class="hover:bg-slate-900/60">
+        <td class="px-3 py-2 text-slate-500 tabular-nums">{{ loop.index }}</td>
+        <td class="px-3 py-2">
+          <a href="/stock/{{ r.symbol }}" class="font-semibold text-slate-100 hover:text-emerald-300">{{ r.symbol }}</a>
+        </td>
+        <td class="px-3 py-2 text-slate-400 hidden sm:table-cell text-xs">{{ r.sector }}</td>
+        <td class="px-3 py-2 text-right font-semibold tabular-nums {{ fc }}">{{ r.score }}</td>
+        <td class="px-3 py-2 text-right tabular-nums">{{ m.num(r.close) }}</td>
+        <td class="px-3 py-2 text-right tabular-nums hidden md:table-cell">{{ m.num(r.pe_ttm, 1) }}</td>
+        <td class="px-3 py-2 text-right tabular-nums hidden md:table-cell">{{ m.pct((r.roe * 100) if r.roe is not none else None) }}</td>
+        <td class="px-3 py-2 text-right tabular-nums hidden lg:table-cell">{{ m.pct((r.revenue_growth * 100) if r.revenue_growth is not none else None) }}</td>
+        <td class="px-3 py-2 text-right tabular-nums hidden lg:table-cell">{{ m.pct((r.mom_60d * 100) if r.mom_60d is not none else None) }}</td>
+        <td class="px-3 py-2 text-right tabular-nums hidden sm:table-cell">{{ m.num(r.rsi_14, 0) }}</td>
+        <td class="px-3 py-2 text-right">
+          {% if r.verdict %}{{ m.verdict_badge(r.verdict) }}{% else %}<span class="text-slate-600">&mdash;</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+<p class="text-xs text-slate-600 mt-3">
+  "Fit" is a 0&ndash;100 strategy-match score. "Model" is the trained verdict where the
+  stock is in the daily prediction universe. Tap a symbol for the full analysis.
+</p>
+{% else %}
+<div class="rounded-xl bg-slate-900 border border-slate-800 p-6 text-center text-slate-400">
+  No stocks currently match this strategy.
+</div>
+{% endif %}
+{% endblock %}

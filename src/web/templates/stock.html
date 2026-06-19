@@ -116,17 +116,30 @@
         <div class="font-semibold tabular-nums text-rose-300">{{ m.num(z.stop) }}</div>
       </div>
       <div>
-        <div class="text-xs text-slate-400">Target 1</div>
-        <div class="font-semibold tabular-nums text-emerald-300">{{ m.num(z.target1) }}</div>
+        <div class="text-xs text-slate-400">Target 1 <span class="text-emerald-500/70">(profit goal)</span></div>
+        <div class="font-semibold tabular-nums text-emerald-300">{{ m.num(z.target1) }}
+          {% if z.target1_pct is not none %}<span class="text-xs font-normal text-emerald-400/80">+{{ "%.1f"|format(z.target1_pct) }}%</span>{% endif %}
+        </div>
       </div>
       <div>
         <div class="text-xs text-slate-400">Target 2</div>
-        <div class="font-semibold tabular-nums text-emerald-300">{{ m.num(z.target2) }}</div>
+        <div class="font-semibold tabular-nums text-emerald-300">{{ m.num(z.target2) }}
+          {% if z.target2_pct is not none %}<span class="text-xs font-normal text-emerald-400/80">+{{ "%.1f"|format(z.target2_pct) }}%</span>{% endif %}
+        </div>
+      </div>
+      <div>
+        <div class="text-xs text-slate-400">Resistance (3-mo high)</div>
+        <div class="font-semibold tabular-nums text-amber-300">{{ m.num(t.resistance) if t and t.resistance is not none else "&mdash;"|safe }}</div>
+      </div>
+      <div>
+        <div class="text-xs text-slate-400">Support (3-mo low)</div>
+        <div class="font-semibold tabular-nums text-slate-300">{{ m.num(t.support) if t and t.support is not none else "&mdash;"|safe }}</div>
       </div>
     </div>
     <div class="mt-3 pt-2 border-t border-slate-800 text-xs text-slate-400">
       Risk : Reward &asymp; <span class="text-slate-200 font-semibold">1 : {{ z.risk_reward }}</span>
-      &middot; zones scale with the stock's own volatility (ATR), not fixed %.
+      &middot; first target floored at <span class="text-emerald-300 font-semibold">+{{ "%.0f"|format(z.min_profit_pct) }}%</span>
+      &middot; zones scale with the stock's own volatility (ATR).
     </div>
     {% else %}
     <p class="text-slate-500 text-sm">Not enough price history to compute zones.</p>
@@ -168,6 +181,42 @@
     <p class="text-slate-500 text-sm">Insufficient data to score conviction.</p>
     {% endif %}
   </div>
+</div>
+
+{# ---- Profit-target feasibility (interactive slider) ---- #}
+<div class="rounded-xl bg-slate-900 border border-slate-800 p-4 mb-5"
+     id="feasibility" data-symbol="{{ symbol }}"
+     data-default-target="{% if z and z.target1_pct %}{{ z.target1_pct|round(0)|int }}{% else %}10{% endif %}">
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="text-sm font-semibold text-slate-300">Profit target &mdash; reachable in time?</h2>
+    <span class="text-[11px] text-slate-500">conditions-based estimate</span>
+  </div>
+  <div class="grid grid-cols-1 sm:grid-cols-2 gap-5 items-center">
+    <div>
+      <div class="flex justify-between text-xs text-slate-400 mb-1">
+        <span>Target profit</span>
+        <span class="text-slate-200 font-semibold">+<span id="feas-target-val">10</span>%</span>
+      </div>
+      <input id="feas-target" type="range" min="3" max="40" step="1" value="10"
+             class="w-full accent-emerald-500 cursor-pointer">
+      <div class="flex justify-between text-xs text-slate-400 mb-1 mt-4">
+        <span>Time horizon</span>
+        <span class="text-slate-200 font-semibold"><span id="feas-days-val">30</span> days</span>
+      </div>
+      <input id="feas-days" type="range" min="5" max="90" step="5" value="30"
+             class="w-full accent-sky-500 cursor-pointer">
+    </div>
+    <div id="feas-result" class="rounded-lg border border-slate-800 bg-slate-950/40 p-3 text-center">
+      <div class="text-xs text-slate-400">Chance of hitting <span id="feas-r-target">+10%</span>
+        within <span id="feas-r-days">30</span> days</div>
+      <div id="feas-verdict" class="mt-1 text-2xl font-bold text-slate-300">&mdash;</div>
+      <div id="feas-prob" class="text-sm text-slate-400 mt-0.5"></div>
+      <div id="feas-price" class="text-xs text-slate-500 mt-1"></div>
+    </div>
+  </div>
+  <ul id="feas-notes" class="mt-3 text-xs text-slate-400 space-y-0.5 list-disc list-inside"></ul>
+  <p class="text-[11px] text-slate-600 mt-2">Estimate from this stock's own volatility and recent trend
+    (first-passage model). A reality check on the target/time you pick &mdash; not a guarantee or advice.</p>
 </div>
 
 {# ---- Chart ---- #}
@@ -256,6 +305,49 @@
   {% endif %}
 </div>
 {% endif %}
+
+{# ---- Latest news + merger/demerger flags ---- #}
+<div class="rounded-xl bg-slate-900 border border-slate-800 p-4 mb-5">
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="text-sm font-semibold text-slate-300">Latest news &amp; headlines</h2>
+    <span class="text-[11px] text-slate-500">Google News &middot; auto-refreshed</span>
+  </div>
+
+  {% if d.corporate_events %}
+  <div class="mb-3 rounded-lg bg-fuchsia-500/10 border border-fuchsia-700 text-fuchsia-100 px-3 py-2">
+    <div class="text-xs font-semibold uppercase tracking-wide text-fuchsia-300 mb-1">Merger / demerger / M&amp;A alert</div>
+    <ul class="space-y-1 text-sm">
+      {% for n in d.corporate_events[:3] %}
+      <li>&bull; <a href="{{ n.url }}" target="_blank" rel="noopener noreferrer" class="hover:underline">{{ n.title }}</a></li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  {% if d.news %}
+  <ul class="divide-y divide-slate-800">
+    {% for n in d.news %}
+    <li class="py-2.5 flex items-start gap-3">
+      <div class="flex-1">
+        <a href="{{ n.url }}" target="_blank" rel="noopener noreferrer"
+           class="text-sm text-slate-200 hover:text-emerald-300 hover:underline">{{ n.title }}</a>
+        <div class="mt-0.5 text-[11px] text-slate-500">
+          {{ n.publisher }}{% if n.published_date %} &middot; {{ n.published_date }}{% endif %}
+        </div>
+      </div>
+      {% if n.category == 'M&A' %}
+      <span class="shrink-0 text-[10px] px-1.5 py-0.5 rounded border bg-fuchsia-500/15 border-fuchsia-700 text-fuchsia-200">M&amp;A</span>
+      {% elif n.category == 'Corporate action' %}
+      <span class="shrink-0 text-[10px] px-1.5 py-0.5 rounded border bg-sky-500/15 border-sky-700 text-sky-200">Corp action</span>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  <p class="text-[11px] text-slate-600 mt-3">Headlines are informational only and may be delayed; verify on the exchange/company filings before acting.</p>
+  {% else %}
+  <p class="text-slate-500 text-sm">No recent headlines found for this stock.</p>
+  {% endif %}
+</div>
 
 {# ---- Verdict confidence + Fundamentals ---- #}
 <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
@@ -353,4 +445,5 @@
 <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
 <script src="/static/stock-chart.js"></script>
 <script src="/static/live-price.js"></script>
+<script src="/static/feasibility.js"></script>
 {% endblock %}

@@ -371,6 +371,80 @@ def test_search_endpoint_empty_term_is_safe(
     assert r.json()["results"] == []
 
 
+def test_discover_page_renders(client: TestClient, env: dict[str, str]) -> None:
+    client.post(
+        "/login",
+        data={"username": env["WEB_USERNAME"],
+              "password": env["WEB_PASSWORD"]},
+    )
+    r = client.get("/discover")
+    assert r.status_code == 200
+    assert "AI Stock Discovery" in r.text
+    # Strategy tabs are present.
+    assert "Undervalued" in r.text and "Momentum" in r.text
+
+
+def test_api_discover_shape_and_auth(
+    client: TestClient, env: dict[str, str]
+) -> None:
+    # Unauthenticated -> 401.
+    assert client.get("/api/discover").status_code == 401
+    client.post(
+        "/login",
+        data={"username": env["WEB_USERNAME"],
+              "password": env["WEB_PASSWORD"]},
+    )
+    r = client.get("/api/discover", params={"strategy": "value"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["strategy"] == "value"
+    assert isinstance(body["results"], list)
+
+
+def test_api_discover_unknown_strategy_falls_back(
+    client: TestClient, env: dict[str, str]
+) -> None:
+    client.post(
+        "/login",
+        data={"username": env["WEB_USERNAME"],
+              "password": env["WEB_PASSWORD"]},
+    )
+    r = client.get("/api/discover", params={"strategy": "bogus"})
+    assert r.status_code == 200
+    assert r.json()["strategy"] == "top_conviction"
+
+
+def test_risk_page_renders(client: TestClient, env: dict[str, str]) -> None:
+    client.post(
+        "/login",
+        data={"username": env["WEB_USERNAME"],
+              "password": env["WEB_PASSWORD"]},
+    )
+    r = client.get("/risk")
+    assert r.status_code == 200
+    assert "Risk Management" in r.text
+    assert "Position size calculator" in r.text
+    # Seed has an open RELIANCE position -> portfolio health populated.
+    assert "Portfolio health" in r.text
+
+
+def test_api_position_size(client: TestClient, env: dict[str, str]) -> None:
+    assert client.get("/api/position-size").status_code == 401
+    client.post(
+        "/login",
+        data={"username": env["WEB_USERNAME"],
+              "password": env["WEB_PASSWORD"]},
+    )
+    r = client.get("/api/position-size", params={
+        "capital": 100000, "risk_pct": 2, "entry": 1000, "stop": 950,
+    })
+    assert r.status_code == 200
+    body = r.json()
+    assert body["valid"] is True
+    assert body["shares"] == 40
+    assert body["risk_amount"] == 2000.0
+
+
 # --------------------------------------------------------------------------
 # Rate limiter
 # --------------------------------------------------------------------------

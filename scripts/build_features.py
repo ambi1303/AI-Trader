@@ -8,7 +8,9 @@ from datetime import date
 
 from tqdm import tqdm
 
-from src.features.feature_builder import build_for_symbol
+import pandas as pd
+
+from src.features.feature_builder import build_for_symbol, load_market_context
 from src.utils.db import fetch_all
 from src.utils.logger import get_logger
 
@@ -26,6 +28,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--start", type=str)
     p.add_argument("--end", type=str)
     p.add_argument("--limit", type=int)
+    p.add_argument("--incremental", action="store_true",
+                   help="Only (re)compute the new tail per symbol and skip "
+                        "symbols already up to date. Recommended for daily runs.")
+    p.add_argument("--lookback-bars", type=int, default=600,
+                   help="With --incremental: prior bars to load as warm-up so "
+                        "recursive indicators converge (default 600 ~ 2.5y).")
     return p.parse_args(argv)
 
 
@@ -107,12 +115,28 @@ def main(argv: list[str] | None = None) -> int:
     start = date.fromisoformat(args.start) if args.start else None
     end = date.fromisoformat(args.end) if args.end else None
 
-    log.info("Feature build: {} symbols", len(symbols))
+    log.info("Feature build: {} symbols (incremental={})",
+             len(symbols), bool(args.incremental))
+
+    # Load the market-context indices once and share a sector-index cache so a
+    # batch build doesn't re-query the full Nifty/VIX/sector history per symbol.
+    nifty_close, vix_close = load_market_context()
+    sector_cache: dict[str, pd.Series] = {}
+
     total = 0
+    skipped = 0
     for sym in tqdm(symbols, desc="features"):
-        s = build_for_symbol(sym, start=start, end=end)
+        s = build_for_symbol(
+            sym, start=start, end=end,
+            incremental=args.incremental, lookback_bars=args.lookback_bars,
+            nifty_close=nifty_close, vix_close=vix_close,
+            sector_close_cache=sector_cache,
+        )
         total += s.rows_out
-    log.info("Done. Total feature rows written: {}", total)
+        if s.rows_in == 0 and s.rows_out == 0:
+            skipped += 1
+    log.info("Done. Total feature rows written: {} (symbols skipped as "
+             "up-to-date: {})", total, skipped)
     return 0
 
 

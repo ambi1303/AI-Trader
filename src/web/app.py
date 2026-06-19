@@ -310,6 +310,82 @@ def create_app() -> FastAPI:
             request, "stock.html", {"d": detail, "user": user, "symbol": sym},
         )
 
+    @app.get("/discover", response_class=HTMLResponse,
+             include_in_schema=False)
+    async def discover_page(request: Request,
+                            strategy: str = "top_conviction",
+                            user: str = Depends(require_user)):
+        from src.analysis import discovery
+        keys = {s["key"] for s in discovery.STRATEGIES}
+        strat = strategy if strategy in keys else "top_conviction"
+        results = await run_in_threadpool(discovery.scan, strat, 25)
+        return templates.TemplateResponse(
+            request, "discover.html",
+            {
+                "strategies": discovery.STRATEGIES,
+                "active": strat,
+                "results": results,
+                "universe_size": discovery.universe_count(),
+                "user": user,
+            },
+        )
+
+    @app.get("/api/discover", include_in_schema=False)
+    async def api_discover(strategy: str = "top_conviction",
+                           user: str = Depends(require_user)) -> JSONResponse:
+        from src.analysis import discovery
+        keys = {s["key"] for s in discovery.STRATEGIES}
+        strat = strategy if strategy in keys else "top_conviction"
+        results = await run_in_threadpool(discovery.scan, strat, 25)
+        return JSONResponse({"strategy": strat, "results": results})
+
+    @app.get("/risk", response_class=HTMLResponse, include_in_schema=False)
+    async def risk_page(request: Request,
+                        user: str = Depends(require_user)):
+        health = await run_in_threadpool(q.build_portfolio_health)
+        return templates.TemplateResponse(
+            request, "risk.html", {"health": health, "user": user},
+        )
+
+    @app.get("/api/position-size", include_in_schema=False)
+    async def api_position_size(
+        capital: float = 0.0, risk_pct: float = 0.0,
+        entry: float = 0.0, stop: float = 0.0,
+        target: float | None = None, lot_size: int = 1,
+        user: str = Depends(require_user),
+    ) -> JSONResponse:
+        from src.analysis import risk
+        result = risk.position_size(
+            capital, risk_pct, entry, stop,
+            lot_size=lot_size, target=target,
+        )
+        return JSONResponse(result)
+
+    @app.get("/api/profit-feasibility", include_in_schema=False)
+    async def api_profit_feasibility(
+        symbol: str = "", target_pct: float = 10.0, days: int = 30,
+        user: str = Depends(require_user),
+    ) -> JSONResponse:
+        sym = _valid_symbol(symbol)
+        if sym is None:
+            raise HTTPException(status_code=404, detail="unknown symbol")
+        # Bound inputs so a crafted query can't push absurd values into the math.
+        target_pct = max(0.5, min(100.0, float(target_pct)))
+        days = max(1, min(365, int(days)))
+        inputs = await run_in_threadpool(q.get_feasibility_inputs, sym)
+        if not inputs:
+            return JSONResponse({"available": False})
+        from src.analysis import feasibility
+        result = feasibility.target_feasibility(
+            target_pct=target_pct, horizon_days=days,
+            daily_vol=inputs.get("daily_vol"),
+            last_close=inputs.get("last_close"),
+            mom_20d=inputs.get("mom_20d"),
+            mom_60d=inputs.get("mom_60d"),
+            atr_pct=inputs.get("atr_pct"),
+        )
+        return JSONResponse(result)
+
     @app.get("/api/search", include_in_schema=False)
     async def api_search(term: str = "",
                          user: str = Depends(require_user)) -> JSONResponse:

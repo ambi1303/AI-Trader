@@ -20,6 +20,7 @@ URL allow-list:
 
 from __future__ import annotations
 
+import time
 import urllib.parse
 from datetime import datetime, timezone
 from typing import Iterable
@@ -154,3 +155,70 @@ def fetch_for_symbols(symbol_query_map: Iterable[tuple[str, str]]) -> int:
         except Exception as e:  # noqa: BLE001
             log.warning("News fetch failed for {} ({}): {}", sym, q, str(e))
     return total
+
+
+# ---------------------------------------------------------------------------
+# Headline classification + per-symbol on-demand refresh
+# ---------------------------------------------------------------------------
+
+# Mergers/demergers/acquisitions -- the corporate-event news the user wants
+# surfaced. Matched as case-insensitive substrings against the title.
+_MNA_KEYWORDS: tuple[str, ...] = (
+    "merger", "merge", "demerger", "demerge", "amalgamation", "amalgamate",
+    "acquisition", "acquire", "takeover", "take over", "open offer",
+    "scheme of arrangement", "slump sale", "stake sale", "buyout",
+    "joint venture", "to acquire", "acquires", "acquired", "hive off",
+    "spin off", "spin-off",
+)
+# Other routine corporate actions worth flagging (less urgent than M&A).
+_CORP_ACTION_KEYWORDS: tuple[str, ...] = (
+    "bonus issue", "bonus share", "stock split", "share split", "buyback",
+    "buy back", "rights issue", "record date", "ex-dividend", "dividend",
+    "interim dividend", "final dividend",
+)
+
+
+def classify_headline(title: str) -> str | None:
+    """Tag a headline as ``"M&A"`` (merger/demerger/acquisition),
+    ``"Corporate action"`` (bonus/split/buyback/dividend) or ``None``."""
+    t = (title or "").lower()
+    if any(k in t for k in _MNA_KEYWORDS):
+        return "M&A"
+    if any(k in t for k in _CORP_ACTION_KEYWORDS):
+        return "Corporate action"
+    return None
+
+
+def symbol_query(symbol: str) -> str:
+    """Google-News query string for a stock. We bias toward NSE/share context
+    so generic-word tickers (e.g. ``GAIL``) don't pull unrelated results."""
+    return f'"{symbol}" share NSE India'
+
+
+# In-process TTL cache so repeated page views of the same stock don't re-hit
+# Google News. Maps symbol -> last successful refresh epoch.
+_REFRESH_TTL_S = 1800.0  # 30 minutes
+_last_refresh: dict[str, float] = {}
+
+
+def refresh_symbol_news(symbol: str, *, force: bool = False) -> int:
+    """Best-effort: fetch + store latest headlines for one symbol.
+
+    Throttled by an in-process TTL so a busy stock page doesn't spam the feed.
+    Returns the number of rows fetched (0 on throttle/failure)."""
+    sym = symbol.upper()
+    now = time.time()
+    if not force:
+        last = _last_refresh.get(sym)
+        if last is not None and (now - last) < _REFRESH_TTL_S:
+            return 0
+    try:
+        items = fetch_headlines_for_query(symbol_query(sym))
+        n = upsert_headlines(sym, items)
+        _last_refresh[sym] = now
+        return n
+    except Exception as e:  # noqa: BLE001 -- news is non-critical
+        log.warning("On-demand news refresh failed for {}: {}", sym, str(e))
+        # Still set the timestamp so we don't hammer a failing endpoint.
+        _last_refresh[sym] = now
+        return 0

@@ -47,8 +47,14 @@ from src.notifications.dispatcher import (
     any_channel_sent,
     send_daily,
 )
+from src.backtesting.risk import RiskConfig
 from src.paper.reconcile import reconcile
 from src.signals.generator import SignalGenConfig, generate_signals
+from src.signals.strategy import (
+    StrategyConfig,
+    generate_strategy_signals,
+    strategy_risk_config,
+)
 from src.utils.db import execute, fetch_all
 from src.utils.logger import get_logger
 
@@ -173,6 +179,21 @@ def _step_ingest_angelone(symbols: list[str] | None) -> dict[str, Any]:
     return {"return_code": rc, "skipped": rc == 2}     # rc=2 == no creds
 
 
+def _step_ingest_bhavcopy() -> dict[str, Any]:
+    """Ingest the whole-market official NSE EOD (BhavCopy) for the last few
+    trading days. Free, no auth, and runs anywhere (local + GitHub Actions),
+    so the broad universe the factor strategy trades stays fresh every day.
+    Best-effort -- a download miss for one day is non-fatal.
+    """
+    from datetime import timedelta
+
+    from scripts.ingest_bhavcopy import main as bhav_main
+    end = date.today()
+    start = end - timedelta(days=7)        # short window covers weekend/holiday gaps
+    rc = bhav_main(["--start", start.isoformat(), "--end", end.isoformat()])
+    return {"return_code": rc, "window": f"{start.isoformat()}..{end.isoformat()}"}
+
+
 def _step_fundamentals(symbols: list[str] | None) -> dict[str, Any]:
     """Refresh the current fundamentals snapshot (P/E, ROE, D/E, ...).
 
@@ -189,13 +210,66 @@ def _step_fundamentals(symbols: list[str] | None) -> dict[str, Any]:
     return {"return_code": rc, "skipped": rc == 2}     # rc=2 == no symbols
 
 
-def _step_features(symbols: list[str] | None) -> dict[str, Any]:
+def _step_news(symbols: list[str] | None, *, cap: int = 60) -> dict[str, Any]:
+    """Best-effort daily news refresh (Google News RSS, free/no-auth).
+
+    Targets the names the user actually looks at: currently-held paper
+    positions plus the daily universe (or an explicit --symbols list),
+    capped so we don't hammer the feed. Failures for individual symbols are
+    swallowed inside ``fetch_for_symbols``; this whole step is non-critical.
+    """
+    from src.data_ingestion.news_scraper import fetch_for_symbols, symbol_query
+    from src.utils.db import fetch_all
+
+    targets: list[str] = []
+    if symbols:
+        targets = list(symbols)
+    else:
+        try:
+            held = fetch_all(
+                "SELECT DISTINCT symbol FROM paper_trades WHERE status = 'open'"
+            )
+            uni = fetch_all("SELECT symbol FROM v_universe_today ORDER BY symbol")
+            seen: set[str] = set()
+            for r in [*held, *uni]:
+                s = (r["symbol"] or "").upper()
+                if s and s not in seen:
+                    seen.add(s)
+                    targets.append(s)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("news target resolution failed: {}", exc)
+            targets = []
+
+    targets = targets[:cap]
+    if not targets:
+        return {"return_code": 2, "skipped": True, "symbols": 0}
+    n = fetch_for_symbols((s, symbol_query(s)) for s in targets)
+    return {"return_code": 0, "symbols": len(targets), "rows": n}
+
+
+def _step_features(symbols: list[str] | None,
+                   broad: bool = False,
+                   broad_n: int = 500,
+                   incremental: bool = True) -> dict[str, Any]:
+    """Build features. With ``broad`` (the rules-strategy default) and no
+    explicit symbols, build for the top-N most-liquid equities so the factor
+    strategy has a fresh, diversified universe to rank -- not just the ~47
+    Nifty names in ``v_universe_today``.
+
+    Incremental by default: symbols already up to date are skipped and only
+    the new tail is recomputed, so a daily run is a cheap append rather than a
+    full-history rebuild (which took ~20+ min for the broad universe)."""
     from scripts.build_features import main as features_main
     argv: list[str] = []
     if symbols:
         argv += ["--symbols", ",".join(symbols)]
+    elif broad:
+        argv += ["--top-liquid", str(broad_n)]
+    if incremental:
+        argv += ["--incremental"]
     rc = features_main(argv)
-    return {"return_code": rc}
+    return {"return_code": rc, "broad": broad and not symbols,
+            "incremental": incremental}
 
 
 def _step_predict(symbols: list[str] | None) -> dict[str, Any]:
@@ -208,20 +282,39 @@ def _step_predict(symbols: list[str] | None) -> dict[str, Any]:
 
 
 def _step_generate(as_of: str | None,
-                   threshold_override: float | None) -> dict[str, Any]:
+                   threshold_override: float | None,
+                   engine: str,
+                   risk: RiskConfig | None) -> dict[str, Any]:
+    """Queue BUY signals using the selected engine.
+
+    ``rules`` (default): the transparent factor strategy (momentum + quality +
+    value + trend) which actually trades a diversified book daily.
+    ``ml``: the legacy model-probability path (kept for comparison / research).
+    """
+    if engine == "rules":
+        out = generate_strategy_signals(
+            signal_date=as_of, config=StrategyConfig(), risk=risk,
+        )
+        return {
+            "engine": "rules",
+            "kept": len(out),
+            "symbols": [s.symbol for s in out],
+        }
     # threshold_override is the same --threshold flag the notify step uses;
     # forwarding it here means a single CLI flag now dictates *both* which
     # signals are generated AND which probabilities the report explains.
     cfg = SignalGenConfig(threshold_override=threshold_override)
     out = generate_signals(signal_date=as_of, config=cfg)
     return {
+        "engine": "ml",
         "kept": len(out),
         "symbols": [s.symbol for s in out],
     }
 
 
-def _step_reconcile(as_of: str | None) -> dict[str, Any]:
-    summary = reconcile(as_of=as_of)
+def _step_reconcile(as_of: str | None,
+                    risk: RiskConfig | None) -> dict[str, Any]:
+    summary = reconcile(as_of=as_of, risk=risk)
     return summary.to_dict()
 
 
@@ -272,6 +365,10 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                    help="Comma-separated symbols; default = whole universe.")
     p.add_argument("--threshold", type=float, default=None,
                    help="Override model threshold for signal calculation.")
+    p.add_argument("--signal-engine", choices=("rules", "ml"), default="rules",
+                   help="Which engine queues BUY signals. 'rules' (default) = "
+                        "transparent factor strategy that trades a diversified "
+                        "book daily; 'ml' = legacy model-probability path.")
     p.add_argument("--dry-run", action="store_true",
                    help="Render the report but do not send email/WhatsApp.")
     p.add_argument("--skip-ingest", action="store_true",
@@ -283,8 +380,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                    help="Skip Angel One SmartAPI EOD ingestion. By default it "
                         "runs first (preferred price source) and self-skips "
                         "if ANGEL_* env vars are missing; data-only / no orders.")
+    p.add_argument("--skip-bhavcopy", action="store_true",
+                   help="Skip whole-market BhavCopy EOD ingestion. By default it "
+                        "runs so the broad factor-strategy universe stays fresh "
+                        "daily (free, no auth, cloud-safe).")
     p.add_argument("--skip-fundamentals", action="store_true",
                    help="Skip the fundamentals snapshot refresh.")
+    p.add_argument("--skip-news", action="store_true",
+                   help="Skip the daily news/headlines refresh (Google News "
+                        "RSS for held names + the daily universe).")
+    p.add_argument("--full-features", action="store_true",
+                   help="Force a full-history feature rebuild instead of the "
+                        "default incremental (new-tail-only) build.")
     p.add_argument("--skip-features", action="store_true",
                    help="Skip feature rebuild (use latest persisted features).")
     p.add_argument("--skip-predict", action="store_true",
@@ -316,6 +423,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     run_id = f"daily_{as_of}"
 
+    # The rules engine runs a larger, longer-held diversified book, so signal
+    # generation AND paper reconciliation must share the same capacity / sector
+    # / holding-period limits. The ML path keeps the conservative defaults.
+    shared_risk = (
+        strategy_risk_config(StrategyConfig())
+        if args.signal_engine == "rules" else None
+    )
+
     result = DailyRunResult(
         run_started_at=date.today().isoformat(),
         as_of=as_of,
@@ -337,21 +452,36 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_ingest:
         _run_step("ingest_yfinance", lambda: _step_ingest(syms),
                   run_id=run_id, result=result)
+    # BhavCopy: whole-market official EOD so the broad factor universe is fresh
+    # (only needed for the rules engine; skip it for the light ML-only path).
+    if not args.skip_bhavcopy and args.signal_engine == "rules":
+        _run_step("ingest_bhavcopy", _step_ingest_bhavcopy,
+                  run_id=run_id, result=result)
     if not args.skip_fundamentals:
         _run_step("ingest_fundamentals", lambda: _step_fundamentals(syms),
                   run_id=run_id, result=result)
     if not args.skip_features:
-        _run_step("build_features", lambda: _step_features(syms),
+        _broad = args.signal_engine == "rules"
+        _incremental = not args.full_features
+        _run_step("build_features",
+                  lambda: _step_features(syms, broad=_broad,
+                                         incremental=_incremental),
                   run_id=run_id, result=result)
     if not args.skip_predict:
         _run_step("predict_today", lambda: _step_predict(syms),
                   run_id=run_id, result=result)
     if not args.skip_generate:
         _run_step("generate_signals",
-                  lambda: _step_generate(as_of, args.threshold),
+                  lambda: _step_generate(as_of, args.threshold,
+                                         args.signal_engine, shared_risk),
                   run_id=run_id, result=result)
     if not args.skip_reconcile:
-        _run_step("reconcile_paper", lambda: _step_reconcile(as_of),
+        _run_step("reconcile_paper",
+                  lambda: _step_reconcile(as_of, shared_risk),
+                  run_id=run_id, result=result)
+    # News refresh (after reconcile so it covers today's freshly-held names).
+    if not args.skip_news:
+        _run_step("refresh_news", lambda: _step_news(syms),
                   run_id=run_id, result=result)
 
     # Step 7: notify (always; even if everything else broke we want the

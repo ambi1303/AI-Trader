@@ -33,7 +33,7 @@ from src.features import (
 from src.features import (
     technical_indicators as ti,
 )
-from src.utils.db import fetch_all, transaction
+from src.utils.db import fetch_all, fetch_one, transaction
 from src.utils.logger import get_logger
 
 log = get_logger("features.builder")
@@ -167,6 +167,65 @@ def _load_price_df(symbol: str, source: str = "bhavcopy") -> pd.DataFrame:
         df = pd.concat([df, yf]) if not df.empty else yf
 
     return df
+
+
+_PRICE_SOURCES_IN = "('bhavcopy','yfinance')"
+
+
+def _last_feature_date(symbol: str) -> date | None:
+    """Latest feature_date already stored for the *current* feature version.
+
+    Restricting to the current version means a ``FEATURE_SET_VERSION`` bump
+    transparently forces a full rebuild (old rows don't count as 'fresh').
+    """
+    row = fetch_one(
+        "SELECT MAX(feature_date) AS d FROM feature_data "
+        "WHERE symbol = ? AND feature_set_version = ?",
+        (symbol, FEATURE_SET_VERSION),
+    )
+    d = row["d"] if row else None
+    return date.fromisoformat(d) if d else None
+
+
+def _max_price_date(symbol: str) -> date | None:
+    row = fetch_one(
+        f"SELECT MAX(bar_date) AS d FROM price_data "
+        f"WHERE symbol = ? AND source IN {_PRICE_SOURCES_IN}",
+        (symbol,),
+    )
+    d = row["d"] if row else None
+    return date.fromisoformat(d) if d else None
+
+
+def _warmup_start(symbol: str, last_fd: date, lookback_bars: int) -> date | None:
+    """The bar_date ``lookback_bars`` trading days before ``last_fd``.
+
+    Recomputing the tail over this window gives the recursive indicators
+    (EMA/RSI/ATR/ADX) enough warm-up to converge to within a negligible
+    error of a full-history build, while loading/processing far less data.
+    """
+    rows = fetch_all(
+        f"""
+        SELECT bar_date FROM (
+            SELECT DISTINCT bar_date FROM price_data
+            WHERE symbol = ? AND bar_date <= ? AND source IN {_PRICE_SOURCES_IN}
+            ORDER BY bar_date DESC LIMIT ?
+        ) ORDER BY bar_date ASC LIMIT 1
+        """,
+        (symbol, last_fd.isoformat(), int(lookback_bars)),
+    )
+    if not rows:
+        return None
+    d = rows[0]["bar_date"]
+    return date.fromisoformat(d) if isinstance(d, str) else d
+
+
+def load_market_context(
+    nifty_symbol: str = "^NSEI", vix_symbol: str = "^INDIAVIX"
+) -> tuple[pd.Series, pd.Series]:
+    """Load Nifty + VIX close series once so a batch build can reuse them
+    instead of re-querying the full index history for every symbol."""
+    return _load_index_close(nifty_symbol), _load_index_close(vix_symbol)
 
 
 def _load_index_close(symbol: str) -> pd.Series:
@@ -453,7 +512,35 @@ def build_for_symbol(
     end: date | None = None,
     nifty_symbol: str = "^NSEI",
     vix_symbol: str = "^INDIAVIX",
+    incremental: bool = False,
+    lookback_bars: int = 600,
+    nifty_close: pd.Series | None = None,
+    vix_close: pd.Series | None = None,
+    sector_close_cache: dict[str, pd.Series] | None = None,
 ) -> BuildSummary:
+    """Build (and upsert) features for one symbol.
+
+    Incremental mode (``incremental=True``): skip the symbol entirely if its
+    stored features are already current, otherwise recompute only the tail
+    (warmed up by ``lookback_bars`` prior bars) and persist just the new dates.
+    This turns the daily run from a full-history rebuild into a cheap append.
+
+    Pre-loaded ``nifty_close`` / ``vix_close`` and a shared
+    ``sector_close_cache`` let a batch caller load the index series once
+    instead of re-querying them for every symbol.
+    """
+    persist_after: date | None = None
+    if incremental:
+        last_fd = _last_feature_date(symbol)
+        max_pd = _max_price_date(symbol)
+        if last_fd is not None and max_pd is not None and last_fd >= max_pd:
+            return BuildSummary(symbol=symbol, rows_in=0, rows_out=0)  # up to date
+        if last_fd is not None:
+            persist_after = last_fd
+            ws = _warmup_start(symbol, last_fd, lookback_bars)
+            if ws is not None and (start is None or ws > start):
+                start = ws
+
     price_df = _load_price_df(symbol)
     if start is not None:
         price_df = price_df[price_df.index >= start]
@@ -464,13 +551,24 @@ def build_for_symbol(
         log.warning("No bhavcopy price data for {} in the given range", symbol)
         return BuildSummary(symbol=symbol, rows_in=0, rows_out=0)
 
-    nifty_close = _load_index_close(nifty_symbol)
-    vix_close = _load_index_close(vix_symbol)
+    if nifty_close is None:
+        nifty_close = _load_index_close(nifty_symbol)
+    if vix_close is None:
+        vix_close = _load_index_close(vix_symbol)
+
     sector_idx = _load_sector_index(symbol)
-    sector_close = (
-        _load_index_close(sector_idx) if sector_idx and sector_idx != nifty_symbol
-        else nifty_close
-    )
+    if sector_close_cache is not None:
+        if sector_idx not in sector_close_cache:
+            sector_close_cache[sector_idx] = (
+                _load_index_close(sector_idx)
+                if sector_idx and sector_idx != nifty_symbol else nifty_close
+            )
+        sector_close = sector_close_cache[sector_idx]
+    else:
+        sector_close = (
+            _load_index_close(sector_idx)
+            if sector_idx and sector_idx != nifty_symbol else nifty_close
+        )
     circuit_df = _load_circuit_flags(symbol)
     fundamentals_df = _load_fundamentals(symbol)
 
@@ -482,6 +580,9 @@ def build_for_symbol(
         circuit_df=circuit_df,
         fundamentals_df=fundamentals_df,
     )
+    if persist_after is not None and not feat_df.empty:
+        feat_df = feat_df[feat_df.index > persist_after]
     rows_out = _persist(symbol, feat_df)
-    log.info("Built {} feature rows for {}", rows_out, symbol)
+    log.info("Built {} feature rows for {}{}", rows_out, symbol,
+             " (incremental)" if incremental else "")
     return BuildSummary(symbol=symbol, rows_in=len(price_df), rows_out=rows_out)
