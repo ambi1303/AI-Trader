@@ -19,7 +19,7 @@ from src.utils.logger import get_logger
 
 log = get_logger("db.migrate")
 
-SCHEMA_VERSION = 5  # v5: fundamentals + tri-class/price-target prediction cols
+SCHEMA_VERSION = 7  # v7: price_forecasts provenance (method, model_run_id)
 _SCHEMA_FILE = Path(__file__).parent / "schema.sql"
 
 
@@ -131,9 +131,42 @@ def _migrate_to_v5(conn) -> None:
     )
 
 
+def _migrate_to_v6(conn) -> None:
+    """v6: per-regime backtest tagging.
+
+    ``backtest_trades`` gains a nullable ``entry_regime`` column so each trade
+    records the market regime active at entry. The ``market_regime`` table
+    itself is a brand-new standalone table created by schema.sql's
+    CREATE IF NOT EXISTS (which runs before these handlers), so no ALTER is
+    needed for it here.
+    """
+    bt_cols = _table_columns(conn, "backtest_trades")
+    if "entry_regime" not in bt_cols:
+        log.info("v6 migration: adding backtest_trades.entry_regime")
+        conn.execute("ALTER TABLE backtest_trades ADD COLUMN entry_regime TEXT")
+
+
+def _migrate_to_v7(conn) -> None:
+    """v7: provenance on price forecasts.
+
+    ``price_forecasts`` gains ``method`` ('ml' vs analytic 'drift') and
+    ``model_run_id`` (the horizon-bundle run that produced an ML row) so the UI
+    and audits can tell learned targets apart from the transparent projection.
+    Both are nullable; existing rows predate the learned model and read as the
+    analytic projection.
+    """
+    fc_cols = _table_columns(conn, "price_forecasts")
+    for col, ddl in (("method", "TEXT"), ("model_run_id", "TEXT")):
+        if col not in fc_cols:
+            log.info("v7 migration: adding price_forecasts.{}", col)
+            conn.execute(f"ALTER TABLE price_forecasts ADD COLUMN {col} {ddl}")
+
+
 _VERSIONED_MIGRATIONS = {
     4: _migrate_to_v4,
     5: _migrate_to_v5,
+    6: _migrate_to_v6,
+    7: _migrate_to_v7,
 }
 
 

@@ -322,6 +322,22 @@ def test_signal_today_appears(client: TestClient,
     assert "INFY" in syms
 
 
+def test_positions_page_shows_investment_stats(client: TestClient,
+                                               env: dict[str, str]) -> None:
+    client.post(
+        "/login",
+        data={"username": env["WEB_USERNAME"],
+              "password": env["WEB_PASSWORD"]},
+    )
+    r = client.get("/positions")
+    assert r.status_code == 200
+    # The seeded RELIANCE open position drives the summary cards + columns.
+    assert "Invested" in r.text
+    assert "Current value" in r.text
+    assert "Unrealised P&amp;L" in r.text
+    assert "RELIANCE" in r.text
+
+
 def test_stock_page_renders_with_analysis_cards(
     client: TestClient, env: dict[str, str]
 ) -> None:

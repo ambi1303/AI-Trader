@@ -151,6 +151,68 @@ def test_no_signal_no_trades():
     assert res.equity_curve["equity"].iloc[-1] == cfg.initial_capital
 
 
+def test_trades_tagged_with_entry_regime():
+    # Same setup as the entry test, but supply a regime timeline. The trade
+    # enters on 2024-01-03 (T+1), so it must be tagged BULL_TREND.
+    path = [
+        (100.0, 100.5, 99.5, 100.0),
+        (100.0, 100.5, 99.5, 100.0),  # signal day (2024-01-02)
+        (101.0, 105.0, 100.5, 104.0),  # entry 2024-01-03 + target
+        (104.0, 110.0, 103.0, 109.0),
+        (109.0, 109.5, 108.0, 108.5),
+    ]
+    prices, atr = _build_synth_inputs(path)
+    signals = _signal("TST", on_date=date(2024, 1, 2), prob=0.99)
+    cfg = EngineConfig(
+        sizing=SizingConfig(risk_per_trade_pct=0.10, max_position_pct=0.50,
+                            kelly_fraction=1.0, min_trade_rupees=100),
+        risk=RiskConfig(stop_atr_mult=2.0, take_profit_atr_mult=3.0,
+                        use_trailing_stop=False, max_holding_days=10,
+                        max_per_sector=10, max_concurrent_positions=10,
+                        daily_loss_limit_pct=1.0, cooldown_days_after_loss=0),
+        cost=load_cost_config(),
+        name="unit_regime_tag",
+    )
+    regime_by_date = {
+        "2024-01-01": "RANGE",
+        "2024-01-03": "BULL_TREND",   # as-of lookup carries forward to later days
+    }
+    res = run_backtest(predictions=signals, prices=prices, atr=atr,
+                       sectors={"TST": "X"}, threshold=0.5, cfg=cfg,
+                       regime_by_date=regime_by_date)
+    assert len(res.trades) == 1
+    assert res.trades.iloc[0]["entry_regime"] == "BULL_TREND"
+    # Per-regime summary is populated and the equity curve carries a regime col.
+    assert res.by_regime["BULL_TREND"]["n_trades"] == 1
+    assert "regime" in res.equity_curve.columns
+
+
+def test_no_regime_mapping_leaves_tags_none():
+    path = [
+        (100.0, 100.5, 99.5, 100.0),
+        (100.0, 100.5, 99.5, 100.0),
+        (101.0, 105.0, 100.5, 104.0),
+        (104.0, 110.0, 103.0, 109.0),
+    ]
+    prices, atr = _build_synth_inputs(path)
+    signals = _signal("TST", on_date=date(2024, 1, 2), prob=0.99)
+    cfg = EngineConfig(
+        sizing=SizingConfig(risk_per_trade_pct=0.10, max_position_pct=0.50,
+                            kelly_fraction=1.0, min_trade_rupees=100),
+        risk=RiskConfig(stop_atr_mult=2.0, take_profit_atr_mult=3.0,
+                        use_trailing_stop=False, max_holding_days=10,
+                        max_per_sector=10, max_concurrent_positions=10,
+                        daily_loss_limit_pct=1.0, cooldown_days_after_loss=0),
+        cost=load_cost_config(),
+        name="unit_regime_none",
+    )
+    res = run_backtest(predictions=signals, prices=prices, atr=atr,
+                       sectors={"TST": "X"}, threshold=0.5, cfg=cfg)
+    assert res.trades.iloc[0]["entry_regime"] is None
+    # Regime-agnostic backtest -> single UNKNOWN bucket from the equity curve.
+    assert "UNKNOWN" in res.by_regime
+
+
 def test_force_close_at_end_of_window():
     # Signal day 1, no stop/target hit -> position should be force-closed at end.
     # ATR=1 so target=104. Make sure no day reaches 104 or below 99.

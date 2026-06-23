@@ -275,11 +275,15 @@ def create_app() -> FastAPI:
              include_in_schema=False)
     async def positions(request: Request,
                         user: str = Depends(require_user)):
+        open_positions = q.get_open_positions()
+        closed = q.get_recent_closed(window_days=30, limit=200)
+        summary = q.summarize_positions(open_positions, closed)
         return templates.TemplateResponse(
             request, "positions.html",
             {
-                "open_positions": q.get_open_positions(),
-                "closed": q.get_recent_closed(window_days=30, limit=200),
+                "open_positions": open_positions,
+                "closed": closed,
+                "summary": summary,
                 "user": user,
             },
         )
@@ -384,6 +388,30 @@ def create_app() -> FastAPI:
             mom_60d=inputs.get("mom_60d"),
             atr_pct=inputs.get("atr_pct"),
         )
+        return JSONResponse(result)
+
+    @app.get("/api/forecast/{symbol}", include_in_schema=False)
+    async def api_forecast(symbol: str,
+                           user: str = Depends(require_user)) -> JSONResponse:
+        sym = _valid_symbol(symbol)
+        if sym is None:
+            raise HTTPException(status_code=404, detail="unknown symbol")
+        # Learned per-horizon model when trained (analytic fallback inside),
+        # else the analytic projection from on-demand feasibility inputs.
+        from src.analysis.forecast_store import forecast_symbol
+        result = await run_in_threadpool(forecast_symbol, sym)
+        if not result.get("available"):
+            inputs = await run_in_threadpool(q.get_feasibility_inputs, sym)
+            if not inputs or not inputs.get("daily_vol"):
+                return JSONResponse({"available": False})
+            from src.analysis.forecast import forecast_stock
+            result = forecast_stock(
+                last_close=inputs.get("last_close"),
+                daily_vol=inputs.get("daily_vol"),
+                mom_20d=inputs.get("mom_20d"),
+                mom_60d=inputs.get("mom_60d"),
+                symbol=sym,
+            )
         return JSONResponse(result)
 
     @app.get("/api/search", include_in_schema=False)

@@ -89,6 +89,22 @@ class ClosedTradeRow:
 
 
 @dataclass(frozen=True)
+class PositionsSummary:
+    """Roll-up of the open book plus recent realised performance, for the
+    positions page header cards."""
+    n_open: int = 0
+    invested: float = 0.0           # cost basis of open positions (entry x qty)
+    market_value: float = 0.0       # current value (last close x qty)
+    unrealised_pnl: float = 0.0     # market_value - invested
+    unrealised_pnl_pct: float = 0.0
+    realised_pnl_30d: float = 0.0   # net P&L of trades closed in the window
+    win_rate_30d_pct: float = 0.0
+    winners_30d: int = 0
+    losers_30d: int = 0
+    closed_30d: int = 0
+
+
+@dataclass(frozen=True)
 class CandidateRow:
     """A ranked model prediction for the latest scored date.
 
@@ -389,6 +405,43 @@ def get_open_positions(as_of: str | None = None) -> list[OpenPositionRow]:
     return out
 
 
+def summarize_positions(
+    open_positions: list[OpenPositionRow],
+    closed: list[ClosedTradeRow],
+) -> PositionsSummary:
+    """Aggregate the open book (invested / value / unrealised P&L) and the
+    recent closed trades (realised P&L / win rate) for the header cards.
+
+    A position whose last close is unknown is valued at its entry price, so it
+    contributes 0 unrealised P&L rather than skewing the totals.
+    """
+    invested = sum(p.entry_price * p.qty for p in open_positions)
+    market_value = sum(
+        (p.last_close if p.last_close is not None else p.entry_price) * p.qty
+        for p in open_positions
+    )
+    unreal = market_value - invested
+    unreal_pct = (unreal / invested * 100.0) if invested > 0 else 0.0
+
+    realised = sum(t.net_pnl for t in closed)
+    winners = sum(1 for t in closed if t.net_pnl > 0)
+    losers = sum(1 for t in closed if t.net_pnl < 0)
+    win_rate = (winners / len(closed) * 100.0) if closed else 0.0
+
+    return PositionsSummary(
+        n_open=len(open_positions),
+        invested=invested,
+        market_value=market_value,
+        unrealised_pnl=unreal,
+        unrealised_pnl_pct=unreal_pct,
+        realised_pnl_30d=realised,
+        win_rate_30d_pct=win_rate,
+        winners_30d=winners,
+        losers_30d=losers,
+        closed_30d=len(closed),
+    )
+
+
 def get_recent_closed(window_days: int = 30, limit: int = 50) -> list[ClosedTradeRow]:
     # Compute the cutoff in Python (portable across SQLite and Postgres);
     # exit_date is stored as an ISO 'YYYY-MM-DD' string in both backends so a
@@ -490,7 +543,12 @@ def build_dashboard_snapshot(as_of: str | None = None) -> DashboardSnapshot:
     the page never silently lies about freshness.
     """
     today = as_of or date.today().isoformat()
-    signals = get_today_signals(today)
+    # Pass ``as_of`` straight through (may be None) so get_today_signals can
+    # fall back to the latest available signal date when today is dry. Passing
+    # the resolved ``today`` here would suppress that fallback and blank the
+    # page whenever local date != the signal date (e.g. the late-night UTC
+    # rollover window).
+    signals = get_today_signals(as_of)
     # If we fell back, use that date as the headline "as of"; otherwise
     # keep today's date so the user sees a fresh run.
     effective_as_of = signals[0].signal_date if signals else today
@@ -648,7 +706,7 @@ def get_news_for_symbol(
 
     rows = _safe_fetch(
         """
-        SELECT published_at, source, title, url
+        SELECT published_at, source, title, url, sentiment, sentiment_label
         FROM   news_headlines
         WHERE  symbol = ?
         ORDER  BY published_at DESC
@@ -666,6 +724,7 @@ def get_news_for_symbol(
     out: list[dict[str, Any]] = []
     for r in rows:
         publisher = (r.get("source") or "").split(":", 1)[-1] or "news"
+        sent = r.get("sentiment")
         out.append({
             "title": r.get("title"),
             "url": r.get("url"),
@@ -673,6 +732,8 @@ def get_news_for_symbol(
             "published_date": (r.get("published_at") or "")[:10],
             "publisher": publisher,
             "category": classify_headline(r.get("title") or ""),
+            "sentiment": float(sent) if sent is not None else None,
+            "sentiment_label": r.get("sentiment_label"),
         })
     return out
 
@@ -787,6 +848,30 @@ def get_stock_detail(symbol: str, as_of: str | None = None) -> dict[str, Any]:
     detail["fundamentals_staleness"] = assess.rate_staleness(fund_age)
     detail["fundamental_ratings"] = assess.fundamental_ratings(fundamentals)
 
+    # ---- Multi-horizon price targets (learned model + analytic 3Y) -------
+    # Prefer the learned per-horizon model when a bundle is trained; it falls
+    # back to the transparent drift+volatility projection automatically. For an
+    # on-demand NSE name not yet in feature_data we use the analytic projection
+    # directly. Wrapped so a data hiccup never breaks the page.
+    detail["forecast"] = {"available": False}
+    try:
+        from src.analysis.forecast_store import forecast_symbol
+        fc = forecast_symbol(sym)
+        if not fc.get("available"):
+            from src.analysis.forecast import forecast_stock
+            fi = get_feasibility_inputs(sym)
+            if fi and fi.get("daily_vol"):
+                fc = forecast_stock(
+                    last_close=fi.get("last_close"),
+                    daily_vol=fi.get("daily_vol"),
+                    mom_20d=fi.get("mom_20d"),
+                    mom_60d=fi.get("mom_60d"),
+                    symbol=sym,
+                )
+        detail["forecast"] = fc
+    except Exception as exc:  # noqa: BLE001 -- UI must never crash on this
+        log.warning("forecast failed for {}: {}", sym, exc)
+
     # ---- Complete analysis: technicals + conviction + buy/sell zones --------
     # Universe names use stored DB history (instant); any other NSE stock is
     # fetched on demand. Wrapped so a data hiccup never breaks the page.
@@ -846,6 +931,14 @@ def get_stock_detail(symbol: str, as_of: str | None = None) -> dict[str, Any]:
         news = []
     detail["news"] = news
     detail["corporate_events"] = [n for n in news if n.get("category") == "M&A"]
+
+    # ---- Aggregate news sentiment (FinBERT / lexical), trailing 7 days -------
+    try:
+        from src.data_ingestion.finbert_scorer import symbol_sentiment
+        detail["news_sentiment"] = symbol_sentiment(sym, window_days=7)
+    except Exception as exc:  # noqa: BLE001 -- never break the page on sentiment
+        log.warning("news sentiment failed for {}: {}", sym, exc)
+        detail["news_sentiment"] = {"available": False}
     return detail
 
 

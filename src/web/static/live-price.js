@@ -40,11 +40,16 @@
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
+  var inr0 = new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 });
   var timer = null;
 
   function fmtMoney(v) {
     if (v === null || v === undefined || isNaN(v)) return "—";
     return "\u20B9" + inr.format(v);
+  }
+
+  function pnlClass(base, positive) {
+    return base + " " + (positive ? "text-emerald-400" : "text-rose-400");
   }
 
   function setText(node, sel, text, cls) {
@@ -94,6 +99,12 @@
       }
     }
 
+    // Current market value for this row (shown price x qty).
+    var valEl = node.querySelector(".live-value");
+    if (valEl && shown !== null && !isNaN(qty)) {
+      valEl.textContent = "\u20B9" + inr0.format(shown * qty);
+    }
+
     // Badge
     var badge = node.querySelector(".live-badge");
     if (badge) {
@@ -114,6 +125,44 @@
         badge.className =
           "live-badge inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded border bg-slate-700/40 text-slate-300 border-slate-600";
       }
+    }
+  }
+
+  // Recompute the portfolio summary cards from the latest per-row prices so
+  // the header totals stay consistent with the table as ticks arrive.
+  function updateSummary(quotes, marketOpen) {
+    var box = document.querySelector("[data-portfolio-summary]");
+    if (!box) return;
+    var invested = parseFloat(box.getAttribute("data-invested"));
+    if (isNaN(invested)) return;
+    var value = 0;
+    nodes.forEach(function (node) {
+      var entry = parseFloat(node.getAttribute("data-entry"));
+      var qty = parseFloat(node.getAttribute("data-qty"));
+      if (isNaN(entry) || isNaN(qty)) return;
+      var sym = (node.getAttribute("data-live-symbol") || "").toUpperCase();
+      var qt = quotes[sym];
+      var live = marketOpen && qt && qt.ltp !== null && qt.ltp !== undefined;
+      var shown = live ? qt.ltp : qt ? qt.prev_close : null;
+      // Unknown price -> value at entry so the row is P&L-neutral (matches server).
+      value += (shown !== null && shown !== undefined ? shown : entry) * qty;
+    });
+    var pnl = value - invested;
+    var pnlPct = invested > 0 ? (pnl / invested) * 100.0 : 0.0;
+    var pos = pnl >= 0;
+
+    var vEl = document.getElementById("pf-value");
+    if (vEl) vEl.textContent = inr.format(value);
+    var pEl = document.getElementById("pf-pnl");
+    if (pEl) {
+      pEl.textContent =
+        (pos ? "+" : "-") + "\u20B9" + inr.format(Math.abs(pnl));
+      pEl.className = pnlClass("", pos).trim();
+    }
+    var ppEl = document.getElementById("pf-pnlpct");
+    if (ppEl) {
+      ppEl.textContent = (pos ? "+" : "") + pnlPct.toFixed(2) + "%";
+      ppEl.className = pnlClass("", pos).trim();
     }
   }
 
@@ -157,6 +206,7 @@
           var sym = (node.getAttribute("data-live-symbol") || "").toUpperCase();
           render(node, quotes[sym], open);
         });
+        updateSummary(quotes, open);
         renderStatus(open);
         schedule(open);
       })

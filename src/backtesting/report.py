@@ -37,7 +37,7 @@ def persist(result: BacktestResult, *, model_run_id: str | None = None) -> None:
                 result.start_date, result.end_date,
                 result.initial_capital,
                 json.dumps(result.config, default=str),
-                json.dumps(result.metrics.as_dict(), default=str),
+                json.dumps(_metrics_with_regime(result), default=str),
             ),
         )
         # Replace any existing rows for this bt_run_id
@@ -61,6 +61,7 @@ def persist(result: BacktestResult, *, model_run_id: str | None = None) -> None:
         conn.execute("DELETE FROM backtest_trades WHERE bt_run_id = ?",
                      (result.bt_run_id,))
         if not result.trades.empty:
+            has_regime = "entry_regime" in result.trades.columns
             tr_rows = [
                 (
                     result.bt_run_id, r.symbol, r.side,
@@ -70,6 +71,7 @@ def persist(result: BacktestResult, *, model_run_id: str | None = None) -> None:
                     int(r.holding_days), r.exit_reason,
                     None if r.entry_prob is None else float(r.entry_prob),
                     None if r.threshold is None else float(r.threshold),
+                    getattr(r, "entry_regime", None) if has_regime else None,
                 )
                 for r in result.trades.itertuples(index=False)
             ]
@@ -78,8 +80,9 @@ def persist(result: BacktestResult, *, model_run_id: str | None = None) -> None:
                 INSERT INTO backtest_trades
                     (bt_run_id, symbol, side, entry_date, exit_date,
                      entry_price, exit_price, qty, gross_pnl, cost_rupees,
-                     net_pnl, holding_days, exit_reason, entry_prob, threshold)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     net_pnl, holding_days, exit_reason, entry_prob, threshold,
+                     entry_regime)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 tr_rows,
             )
@@ -88,6 +91,16 @@ def persist(result: BacktestResult, *, model_run_id: str | None = None) -> None:
         "Persisted backtest {} | trades={} equity_rows={}",
         result.bt_run_id, len(result.trades), len(result.equity_curve),
     )
+
+
+def _metrics_with_regime(result: BacktestResult) -> dict:
+    """Aggregate metrics dict with the per-regime breakdown folded in, so the
+    regime analysis is queryable from backtest_runs.metrics_json without a
+    second schema column."""
+    md = result.metrics.as_dict()
+    if result.by_regime:
+        md["by_regime"] = result.by_regime
+    return md
 
 
 # ---------------------------------------------------------------------------
@@ -112,4 +125,17 @@ def format_summary(result: BacktestResult) -> str:
         f"  Cost diagnostics: drag/capital={m.cost_drag_pct:.2f}% | "
         f"cost/|grossPnL|={m.cost_to_gross_pnl_pct:.1f}% | turnover={m.turnover:.2f}x",
     ]
+    if result.by_regime:
+        lines.append("  By regime:")
+        for regime in sorted(result.by_regime):
+            s = result.by_regime[regime]
+            pf = s.get("profit_factor")
+            pf_str = f"{pf:.2f}" if isinstance(pf, (int, float)) else "n/a"
+            lines.append(
+                f"    {regime:<16} n={s.get('n_trades', 0):<4} "
+                f"hit={s.get('win_rate_pct', 0):.0f}% "
+                f"net={s.get('net_pnl', 0):,.0f} PF={pf_str} "
+                f"sharpe={s.get('daily_sharpe', 0)} "
+                f"days={s.get('days_in_regime', 0)}"
+            )
     return "\n".join(lines)

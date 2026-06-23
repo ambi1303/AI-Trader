@@ -5,11 +5,46 @@
 {% block content %}
 <section class="space-y-6">
 
-  <h1 class="text-2xl font-semibold tracking-tight">Positions</h1>
+  <div class="flex items-center gap-2 flex-wrap">
+    <h1 class="text-2xl font-semibold tracking-tight">Positions</h1>
+    <span class="inline-flex items-center text-[11px] px-2 py-0.5 rounded border bg-sky-500/10 text-sky-200 border-sky-800"
+          title="These are simulated (paper) trades tracked in the system, not live broker orders. No real money is invested.">
+      Paper trading {{ m.info("Every position here is a simulated trade recorded by the system. Prices are real, but no real capital is committed and no orders are placed with a broker.") }}
+    </span>
+  </div>
+
+  {# ---- Portfolio summary cards (only meaningful once invested) ---- #}
+  {% if summary and summary.n_open > 0 %}
+  <section class="grid grid-cols-2 lg:grid-cols-4 gap-3"
+           data-portfolio-summary data-invested="{{ summary.invested }}">
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs uppercase tracking-wide text-slate-400">Invested {{ m.info("Cost basis of your currently open positions: entry price x quantity, summed across the open book. This is the (paper) capital tied up right now.") }}</div>
+      <div class="mt-1 text-xl font-semibold tabular-nums">&#8377;{{ "{:,.2f}".format(summary.invested) }}</div>
+      <div class="mt-0.5 text-[11px] text-slate-500">{{ summary.n_open }} open position{{ 's' if summary.n_open != 1 else '' }}</div>
+    </div>
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs uppercase tracking-wide text-slate-400">Current value {{ m.info("What the open positions are worth at the latest price: last/live price x quantity, summed. Updates live while the market is open.") }}</div>
+      <div class="mt-1 text-xl font-semibold tabular-nums">&#8377;<span id="pf-value">{{ "{:,.2f}".format(summary.market_value) }}</span></div>
+      <div class="mt-0.5 text-[11px] text-slate-500">marked to last price</div>
+    </div>
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs uppercase tracking-wide text-slate-400">Unrealised P&amp;L {{ m.info("Open (not yet locked-in) profit or loss = current value - invested. It moves with the price and is only realised when you close the position.") }}</div>
+      <div class="mt-1 text-xl font-semibold tabular-nums"><span id="pf-pnl">{{ m.money(summary.unrealised_pnl) }}</span></div>
+      <div class="mt-0.5 text-[11px] tabular-nums"><span id="pf-pnlpct">{{ m.pct(summary.unrealised_pnl_pct) }}</span></div>
+    </div>
+    <div class="bg-slate-900 border border-slate-800 rounded-xl p-4">
+      <div class="text-xs uppercase tracking-wide text-slate-400">Realised P&amp;L (30d) {{ m.info("Locked-in profit or loss from positions you actually closed in the last 30 days. Unlike unrealised P&L, this is final and no longer changes.") }}</div>
+      <div class="mt-1 text-xl font-semibold tabular-nums">{{ m.money(summary.realised_pnl_30d) }}</div>
+      <div class="mt-0.5 text-[11px] text-slate-500">
+        {% if summary.closed_30d %}{{ summary.winners_30d }}W / {{ summary.losers_30d }}L &middot; {{ "{:.0f}".format(summary.win_rate_30d_pct) }}% win{% else %}no closed trades{% endif %}
+      </div>
+    </div>
+  </section>
+  {% endif %}
 
   <section class="bg-slate-900 border border-slate-800 rounded-xl">
     <header class="px-4 py-3 border-b border-slate-800">
-      <h2 class="font-medium">Open ({{ open_positions|length }})</h2>
+      <h2 class="font-medium">Open ({{ open_positions|length }}) {{ m.info("Positions you currently hold. P&L here is unrealised - it changes with the price until you close the position.") }}</h2>
     </header>
     {% if open_positions %}
     <div class="overflow-x-auto">
@@ -21,9 +56,12 @@
             <th class="text-right px-4 py-2">Qty</th>
             <th class="text-right px-4 py-2">Entry</th>
             <th class="text-right px-4 py-2">Last</th>
+            <th class="text-right px-4 py-2 hidden lg:table-cell">Invested</th>
+            <th class="text-right px-4 py-2 hidden lg:table-cell">Value</th>
             <th class="text-right px-4 py-2 hidden md:table-cell">SL</th>
             <th class="text-right px-4 py-2 hidden md:table-cell">TP</th>
             <th class="text-right px-4 py-2">P&amp;L</th>
+            <th class="text-right px-4 py-2 hidden sm:table-cell">P&amp;L %</th>
             <th class="text-right px-4 py-2">Days</th>
           </tr>
         </thead>
@@ -41,9 +79,12 @@
             <td class="px-4 py-2 text-right tabular-nums">{{ p.qty }}</td>
             <td class="px-4 py-2 text-right tabular-nums">{{ m.num(p.entry_price) }}</td>
             <td class="px-4 py-2 text-right tabular-nums"><span class="live-ltp">{{ m.num(p.last_close) }}</span></td>
+            <td class="px-4 py-2 text-right tabular-nums hidden lg:table-cell text-slate-400">&#8377;{{ "{:,.0f}".format(p.entry_price * p.qty) }}</td>
+            <td class="px-4 py-2 text-right tabular-nums hidden lg:table-cell"><span class="live-value">{% if p.last_close is not none %}&#8377;{{ "{:,.0f}".format(p.last_close * p.qty) }}{% else %}&mdash;{% endif %}</span></td>
             <td class="px-4 py-2 text-right tabular-nums hidden md:table-cell">{{ m.num(p.stop_loss) }}</td>
             <td class="px-4 py-2 text-right tabular-nums hidden md:table-cell">{{ m.num(p.take_profit) }}</td>
             <td class="px-4 py-2 text-right tabular-nums"><span class="live-pnl">{{ m.money(p.unrealised_pnl) }}</span></td>
+            <td class="px-4 py-2 text-right tabular-nums hidden sm:table-cell"><span class="live-pnlpct">{{ m.pct(p.unrealised_pnl_pct) }}</span></td>
             <td class="px-4 py-2 text-right tabular-nums">{{ p.holding_days }}</td>
           </tr>
           {% endfor %}
@@ -57,7 +98,7 @@
 
   <section class="bg-slate-900 border border-slate-800 rounded-xl">
     <header class="px-4 py-3 border-b border-slate-800">
-      <h2 class="font-medium">Closed (last 30 days, {{ closed|length }})</h2>
+      <h2 class="font-medium">Closed (last 30 days, {{ closed|length }}) {{ m.info("Positions you exited in the last 30 days. P&L here is realised - it is final and feeds the Realised P&L card above.") }}</h2>
     </header>
     {% if closed %}
     <div class="overflow-x-auto">

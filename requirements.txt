@@ -48,6 +48,20 @@ xgboost==2.1.3
 joblib==1.4.2
 optuna==4.0.0
 
+# --- News sentiment (FinBERT) ---
+# ProsusAI/finbert scores headline polarity (src/data_ingestion/finbert_scorer).
+# These power the transformer backend; when absent the scorer transparently
+# degrades to a deterministic lexical fallback, so they are effectively optional
+# (and the unit tests run without them). Pinned for reproducible scores; CPU
+# torch wheel only (no CUDA) since scoring short headlines doesn't need a GPU.
+# NOTE: torch is a large (~200MB) download. torch>=2.4 is required for NumPy 2.x
+# compatibility (this project pins numpy 2.1.x); older torch crashes on import.
+transformers==4.44.2
+torch==2.4.1
+# truststore lets the model download use the OS certificate store, so FinBERT
+# works behind corporate TLS-intercepting proxies without disabling cert checks.
+truststore==0.10.0
+
 # --- Broker data (Angel One SmartAPI, read-only) ---
 # We use Angel One purely for live/EOD market data (no order placement),
 # and we call the REST API directly with `requests` + `pyotp` instead of

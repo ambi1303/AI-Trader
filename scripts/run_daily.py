@@ -244,7 +244,23 @@ def _step_news(symbols: list[str] | None, *, cap: int = 60) -> dict[str, Any]:
     if not targets:
         return {"return_code": 2, "skipped": True, "symbols": 0}
     n = fetch_for_symbols((s, symbol_query(s)) for s in targets)
-    return {"return_code": 0, "symbols": len(targets), "rows": n}
+
+    # Score the freshly-ingested (and any other unscored) headlines with FinBERT
+    # / lexical fallback. Best-effort: never let sentiment scoring fail the run.
+    scored = 0
+    backend = "skipped"
+    try:
+        from src.data_ingestion.finbert_scorer import (
+            active_backend,
+            score_unscored_headlines,
+        )
+        scored = score_unscored_headlines()
+        backend = active_backend()
+    except Exception as exc:  # noqa: BLE001 -- sentiment is non-critical
+        log.warning("news sentiment scoring skipped: {}", exc)
+
+    return {"return_code": 0, "symbols": len(targets), "rows": n,
+            "scored": scored, "sentiment_backend": backend}
 
 
 def _step_features(symbols: list[str] | None,
@@ -281,6 +297,40 @@ def _step_predict(symbols: list[str] | None) -> dict[str, Any]:
     return {"return_code": rc}
 
 
+def _step_regime(as_of: str) -> dict[str, Any]:
+    """Classify today's market regime (NIFTY trend + VIX + breadth) and persist
+    it. Runs after features so breadth reads a fresh cross-section, and before
+    signal generation so the router can pick a strategy off the latest row."""
+    from src.regime.store import store_regime
+
+    payload = store_regime(as_of)
+    breadth = payload.get("breadth", {})
+    return {
+        "return_code": 0,
+        "regime": payload["regime"],
+        "prev_regime": payload.get("prev_regime"),
+        "breadth_score": breadth.get("breadth_score"),
+        "vix": payload.get("context", {}).get("vix"),
+        "reasons": payload.get("reasons", []),
+    }
+
+
+def _step_forecast(as_of: str, symbols: list[str] | None) -> dict[str, Any]:
+    """Project + persist multi-horizon price targets (1W..3Y) for the universe.
+
+    Runs after features so each forecast reads the freshest close / volatility /
+    momentum. When no explicit ``--symbols`` are given we forecast the mapped
+    ``stock_sectors`` book (the tradeable universe), keeping the step bounded.
+    """
+    from src.analysis.forecast_store import store_universe
+    from src.utils.db import fetch_all
+
+    syms = symbols or [r["symbol"] for r in
+                       fetch_all("SELECT symbol FROM stock_sectors ORDER BY symbol")]
+    n = store_universe(syms, as_of)
+    return {"return_code": 0, "forecasted": n, "universe": len(syms)}
+
+
 def _step_generate(as_of: str | None,
                    threshold_override: float | None,
                    engine: str,
@@ -288,15 +338,40 @@ def _step_generate(as_of: str | None,
     """Queue BUY signals using the selected engine.
 
     ``rules`` (default): the transparent factor strategy (momentum + quality +
-    value + trend) which actually trades a diversified book daily.
+    value + trend) which actually trades a diversified book daily. The regime
+    router decides which strategy config to use and whether new entries are
+    allowed at all (defensive in BEAR_TREND / CRISIS).
     ``ml``: the legacy model-probability path (kept for comparison / research).
     """
     if engine == "rules":
+        from src.regime.router import select_strategy
+        from src.regime.store import latest_regime
+
+        regime = latest_regime(as_of)
+        plan = select_strategy(regime)
+        if not plan.allow_new_entries:
+            log.info("regime {} -> defensive; no new entries ({})",
+                     regime, plan.note)
+            return {
+                "engine": "rules",
+                "regime": regime,
+                "strategy": plan.engine,
+                "allow_new_entries": False,
+                "note": plan.note,
+                "kept": 0,
+                "symbols": [],
+            }
+        plan_risk = strategy_risk_config(plan.config)
         out = generate_strategy_signals(
-            signal_date=as_of, config=StrategyConfig(), risk=risk,
+            signal_date=as_of, config=plan.config, risk=plan_risk,
+            engine=plan.engine,
         )
         return {
             "engine": "rules",
+            "regime": regime,
+            "strategy": plan.engine,
+            "allow_new_entries": True,
+            "note": plan.note,
             "kept": len(out),
             "symbols": [s.symbol for s in out],
         }
@@ -396,6 +471,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                    help="Skip feature rebuild (use latest persisted features).")
     p.add_argument("--skip-predict", action="store_true",
                    help="Skip model inference (use latest predictions_log rows).")
+    p.add_argument("--skip-regime", action="store_true",
+                   help="Skip market-regime classification. By default (rules "
+                        "engine) it runs after features and routes strategy "
+                        "choice / defensive mode off the latest regime.")
+    p.add_argument("--skip-forecast", action="store_true",
+                   help="Skip multi-horizon price-target forecasts "
+                        "(1W/1M/3M/6M/1Y/3Y) written to price_forecasts.")
     p.add_argument("--skip-generate", action="store_true",
                    help="Skip signal generation (no new entries).")
     p.add_argument("--skip-reconcile", action="store_true",
@@ -469,6 +551,17 @@ def main(argv: list[str] | None = None) -> int:
                   run_id=run_id, result=result)
     if not args.skip_predict:
         _run_step("predict_today", lambda: _step_predict(syms),
+                  run_id=run_id, result=result)
+    # Regime classification (rules engine only): runs after features so breadth
+    # reads a fresh cross-section, and before generate so the router can pick a
+    # strategy / enter defensive mode off the latest regime.
+    if not args.skip_regime and args.signal_engine == "rules":
+        _run_step("classify_regime", lambda: _step_regime(as_of),
+                  run_id=run_id, result=result)
+    # Multi-horizon price-target forecasts (after features, independent of the
+    # signal engine; fault-isolated so a hiccup never blocks signals).
+    if not args.skip_forecast:
+        _run_step("forecast_targets", lambda: _step_forecast(as_of, syms),
                   run_id=run_id, result=result)
     if not args.skip_generate:
         _run_step("generate_signals",

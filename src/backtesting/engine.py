@@ -35,6 +35,7 @@ import pandas as pd
 
 from src.backtesting.cost_model import CostConfig, compute_round_trip
 from src.backtesting.metrics import BacktestMetrics, compute_metrics
+from src.backtesting.regime_analysis import summarize_by_regime
 from src.backtesting.risk import (
     OpenPosition,
     RiskConfig,
@@ -69,6 +70,7 @@ class TradeRecord:
     exit_reason: str
     entry_prob: float
     threshold: float
+    entry_regime: str | None = None
 
 
 @dataclass
@@ -82,6 +84,7 @@ class BacktestResult:
     metrics: BacktestMetrics
     equity_curve: pd.DataFrame = field(default_factory=pd.DataFrame)
     trades: pd.DataFrame = field(default_factory=pd.DataFrame)
+    by_regime: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -133,11 +136,15 @@ def run_backtest(
     sectors: dict[str, str],
     threshold: float,
     cfg: EngineConfig | None = None,
+    regime_by_date: "dict | None" = None,
 ) -> BacktestResult:
     cfg = cfg or EngineConfig()
     _validate_inputs(predictions, prices, atr, sectors)
 
     bt_run_id = _new_bt_run_id(cfg.name)
+    # Per-regime tagging: regime active on a given trading day (as-of lookup).
+    # Empty/None mapping -> every tag is None (regime-agnostic backtest).
+    regime_on = _make_regime_getter(regime_by_date)
 
     # ----- prep frames -----
     pred = predictions.copy()
@@ -240,6 +247,7 @@ def run_backtest(
                 net_pnl=net, holding_days=int(holding_days),
                 exit_reason=reason, entry_prob=pos.entry_prob,
                 threshold=pos.threshold,
+                entry_regime=regime_on(_iso_to_date(pos.entry_date)),
             ))
             if net < 0 and cfg.risk.cooldown_days_after_loss > 0:
                 cd_idx = min(i + cfg.risk.cooldown_days_after_loss,
@@ -316,6 +324,7 @@ def run_backtest(
             "equity": round(equity_now, 2),
             "open_count": len(open_positions),
             "daily_pnl": round(equity_now - prev_equity, 2),
+            "regime": regime_on(today),
         })
         prev_equity = equity_now
 
@@ -341,6 +350,7 @@ def run_backtest(
             holding_days=int(len(all_dates) - 1
                               - all_dates.index(_iso_to_date(pos.entry_date))),
             exit_reason="end", entry_prob=pos.entry_prob, threshold=pos.threshold,
+            entry_regime=regime_on(_iso_to_date(pos.entry_date)),
         ))
     open_positions.clear()
     # Adjust last equity row to reflect closed-out portfolio.
@@ -357,6 +367,7 @@ def run_backtest(
     metrics = compute_metrics(
         equity_curve=eq_df, trades=tr_df, initial_capital=cfg.initial_capital,
     )
+    by_regime = summarize_by_regime(tr_df, eq_df)
 
     log.info(
         "Backtest done | run_id={} trades={} equity_final={:.2f} "
@@ -372,6 +383,7 @@ def run_backtest(
         metrics=metrics,
         equity_curve=eq_df,
         trades=tr_df,
+        by_regime=by_regime,
     )
 
 
@@ -382,6 +394,29 @@ def run_backtest(
 
 def _iso_to_date(s: str):
     return pd.Timestamp(s).date()
+
+
+def _make_regime_getter(regime_by_date: dict | None):
+    """Return a function date->regime label using as-of (latest <= date)
+    semantics, so a trading day with no explicit entry inherits the last known
+    regime. Empty/None mapping -> always None (regime-agnostic backtest)."""
+    if not regime_by_date:
+        return lambda _d: None
+
+    import bisect
+
+    norm: dict = {}
+    for k, v in regime_by_date.items():
+        kd = _iso_to_date(k) if isinstance(k, str) else k
+        norm[kd] = v
+    keys = sorted(norm)
+
+    def get(d):
+        dd = _iso_to_date(d) if isinstance(d, str) else d
+        idx = bisect.bisect_right(keys, dd) - 1
+        return norm[keys[idx]] if idx >= 0 else None
+
+    return get
 
 
 def _equity(cash: float, positions: dict[str, OpenPosition],

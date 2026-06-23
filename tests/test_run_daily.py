@@ -20,6 +20,16 @@ import pytest
 from scripts import run_daily
 from src.utils import db as db_mod
 
+# Steps that hit the network (Angel One, BhavCopy, Google News, cloud publish)
+# or do heavy local work. The orchestrator tests only exercise the
+# fault-isolation + dispatch contract, so we keep every run fully hermetic --
+# otherwise, on a machine with live broker creds, the real pipeline executes.
+_OFFLINE_FLAGS = [
+    "--skip-ingest", "--skip-angelone", "--skip-bhavcopy",
+    "--skip-fundamentals", "--skip-features", "--skip-predict",
+    "--skip-regime", "--skip-forecast", "--skip-news", "--skip-publish",
+]
+
 
 @pytest.fixture()
 def temp_db(tmp_path, monkeypatch):
@@ -61,8 +71,7 @@ def test_orchestrator_skips_run_steps_and_still_dispatches(temp_db, tmp_path,
         ).load_config(cfg_path),
     )
     rc = run_daily.main([
-        "--dry-run",
-        "--skip-ingest", "--skip-features", "--skip-predict",
+        "--dry-run", *_OFFLINE_FLAGS,
         "--skip-generate", "--skip-reconcile",
     ])
     assert rc == 0
@@ -84,8 +93,7 @@ def test_orchestrator_records_failures_in_validation_table(
     monkeypatch.setattr("scripts.run_daily.generate_signals", _boom)
 
     rc = run_daily.main([
-        "--dry-run", "--signal-engine", "ml",
-        "--skip-ingest", "--skip-features", "--skip-predict",
+        "--dry-run", "--signal-engine", "ml", *_OFFLINE_FLAGS,
         "--skip-reconcile",
     ])
     # Dry run never asks "did anything send"; we just check the script
@@ -101,7 +109,7 @@ def test_orchestrator_records_failures_in_validation_table(
 def test_orchestrator_skip_notify_returns_zero(temp_db, tmp_path, monkeypatch):
     """When --skip-notify is set, exit code is 0 even with no dispatch."""
     rc = run_daily.main([
-        "--skip-ingest", "--skip-features", "--skip-predict",
+        *_OFFLINE_FLAGS,
         "--skip-generate", "--skip-reconcile", "--skip-notify",
     ])
     assert rc == 0
@@ -134,8 +142,7 @@ def test_summary_serialises_to_valid_json(temp_db, tmp_path, monkeypatch,
         ).load_config(cfg_path),
     )
     rc = run_daily.main([
-        "--dry-run", "--print-summary",
-        "--skip-ingest", "--skip-features", "--skip-predict",
+        "--dry-run", "--print-summary", *_OFFLINE_FLAGS,
         "--skip-generate", "--skip-reconcile",
     ])
     assert rc == 0

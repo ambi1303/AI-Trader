@@ -410,10 +410,89 @@ CREATE TABLE IF NOT EXISTS backtest_trades (
     exit_reason     TEXT NOT NULL,          -- stop | target | trail | time | end
     entry_prob      REAL,
     threshold       REAL,
+    entry_regime    TEXT,                    -- market regime active at entry (Phase 1A)
     FOREIGN KEY (bt_run_id) REFERENCES backtest_runs(bt_run_id)
 );
 CREATE INDEX IF NOT EXISTS ix_bt_trades_run    ON backtest_trades(bt_run_id);
 CREATE INDEX IF NOT EXISTS ix_bt_trades_symbol ON backtest_trades(symbol);
+
+-- ---------------------------------------------------------------
+-- Market regime (Phase 1A): one row per day. Rule-based classification of
+-- NIFTY trend + India VIX + market breadth into BULL_TREND / BEAR_TREND /
+-- RANGE / HIGH_VOLATILITY / CRISIS. The signal step routes strategy choice
+-- (and whether new entries are allowed) off the latest row. A brand-new
+-- standalone table, so CREATE IF NOT EXISTS lands it on fresh and existing
+-- DBs alike (no ALTER migration needed).
+-- ---------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS market_regime (
+    as_of_date          TEXT PRIMARY KEY,    -- ISO YYYY-MM-DD
+    regime              TEXT NOT NULL,
+    nifty_above_ma200   INTEGER,             -- 1/0/NULL
+    nifty_ma50_gt_ma200 INTEGER,             -- 1/0/NULL
+    vix                 REAL,
+    pct_above_50dma     REAL,
+    pct_above_200dma    REAL,
+    adv_decl_ratio      REAL,
+    breadth_score       REAL,                -- 0..100 composite
+    scores_json         TEXT,                -- full diagnostic payload
+    created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+CREATE INDEX IF NOT EXISTS ix_market_regime_date ON market_regime(as_of_date);
+
+-- ---------------------------------------------------------------
+-- Pairs trading (Phase 2): one row per cointegrated pair per scan date. A pair
+-- is (Y, X) with hedge ratio beta from OLS (Y ~ alpha + beta*X); the spread
+-- Y - beta*X is mean-reverting when adf_tstat clears the Engle-Granger
+-- threshold. zscore is the latest standardised spread; signal is the desired
+-- action on the spread (LONG_SPREAD = long Y / short X, etc.). Research/signal
+-- only for now -- execution needs a short leg (paper_trades is LONG-only in v1).
+-- A brand-new standalone table, so CREATE IF NOT EXISTS lands it on fresh and
+-- existing DBs alike (no ALTER migration needed).
+-- ---------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS pairs (
+    as_of_date   TEXT NOT NULL,           -- ISO YYYY-MM-DD (scan date)
+    symbol_y     TEXT NOT NULL,           -- dependent leg
+    symbol_x     TEXT NOT NULL,           -- hedge leg
+    sector       TEXT,                    -- shared sector (economic rationale)
+    beta         REAL NOT NULL,           -- hedge ratio (shares of X per Y)
+    alpha        REAL NOT NULL,           -- intercept
+    adf_tstat    REAL NOT NULL,           -- Engle-Granger residual ADF t-stat
+    half_life    REAL,                    -- mean-reversion half-life (days)
+    corr         REAL,                    -- return correlation (diagnostic)
+    spread_mean  REAL,
+    spread_std   REAL,
+    zscore       REAL,                    -- latest standardised spread
+    signal       TEXT,                    -- LONG_SPREAD|SHORT_SPREAD|EXIT|HOLD|FLAT
+    n_obs        INTEGER,                 -- observations used in the fit
+    created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (as_of_date, symbol_y, symbol_x)
+);
+CREATE INDEX IF NOT EXISTS ix_pairs_date_signal ON pairs(as_of_date, signal);
+
+-- ---------------------------------------------------------------
+-- Multi-horizon price-target projections (drift + volatility model).
+-- One row per (symbol, as_of_date, horizon). expected/low/high are the
+-- projected price and 1-sigma band; prob_up is the terminal up-probability.
+-- ---------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS price_forecasts (
+    symbol               TEXT NOT NULL,
+    as_of_date           TEXT NOT NULL,        -- ISO YYYY-MM-DD
+    horizon_label        TEXT NOT NULL,        -- 1W|1M|3M|6M|1Y|3Y
+    horizon_days         INTEGER NOT NULL,
+    last_close           REAL NOT NULL,
+    expected_price       REAL NOT NULL,
+    low_price            REAL NOT NULL,        -- ~16th percentile (1-sigma)
+    high_price           REAL NOT NULL,        -- ~84th percentile (1-sigma)
+    expected_return_pct  REAL NOT NULL,
+    annualized_return_pct REAL,
+    prob_up_pct          REAL,
+    verdict              TEXT,
+    method               TEXT,                 -- 'ml' (learned per-horizon) | 'drift' (analytic)
+    model_run_id         TEXT,                 -- horizon-bundle run_id when method='ml'
+    created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    PRIMARY KEY (symbol, as_of_date, horizon_label)
+);
+CREATE INDEX IF NOT EXISTS ix_forecasts_date ON price_forecasts(as_of_date);
 
 -- ---------------------------------------------------------------
 -- Useful views

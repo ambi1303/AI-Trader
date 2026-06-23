@@ -67,7 +67,8 @@ def _load_rows() -> list[dict[str, Any]]:
         """
         SELECT fd.symbol, fd.close, fd.rsi_14, fd.macd_hist,
                fd.mom_20d, fd.mom_60d, fd.ret_20d, fd.dd_from_high_252d,
-               fd.dist_ema_50_pct, fd.dist_ema_200_pct, fd.vol_20d
+               fd.dist_ema_50_pct, fd.dist_ema_200_pct, fd.vol_20d,
+               fd.bb_pct_b, fd.vol_ratio_20d, fd.atr_pct, fd.stoch_k
         FROM   feature_data fd
         JOIN  (SELECT symbol, MAX(feature_date) AS md
                FROM feature_data GROUP BY symbol) x

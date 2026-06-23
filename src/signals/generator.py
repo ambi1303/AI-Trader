@@ -65,6 +65,19 @@ class SignalGenConfig:
     max_signals_today: int | None = None     # None = use risk.max_concurrent
     log_run_id: str = "signal_gen"
 
+    # --- News-sentiment gate (FinBERT / lexical) -------------------------
+    # A soft overlay on the model's pick: veto entries into strongly negative
+    # news, and modestly scale size with sentiment. Look-ahead safe (only
+    # headlines published on/before the signal date are used). All knobs are
+    # conservative and the effect is fully audited in the signal payload.
+    use_news_sentiment: bool = True
+    sentiment_window_days: int = 7
+    sentiment_veto_score: float = -0.35      # veto if mean sentiment <= this ...
+    sentiment_min_headlines: int = 2         # ... and at least this many headlines
+    sentiment_size_weight: float = 0.25      # size multiplier sensitivity
+    sentiment_size_floor: float = 0.75       # clamp: never shrink below this ...
+    sentiment_size_cap: float = 1.15         # ... nor grow beyond this
+
 
 @dataclass(frozen=True)
 class GeneratedSignal:
@@ -85,6 +98,9 @@ class GeneratedSignal:
     sizing_rationale: str
     raw_kelly_qty: int
     raw_vol_qty: int
+    news_sentiment: float | None = None      # mean signed sentiment, or None
+    news_label: str | None = None            # 'positive'|'negative'|'neutral'
+    size_factor: float = 1.0                 # sentiment size multiplier applied
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +211,27 @@ def _sector_for(symbol: str) -> str:
     return row["sector"] if row and row["sector"] else "UNKNOWN"
 
 
+def _news_sentiment(symbol: str, on_date: str, window_days: int) -> dict[str, Any] | None:
+    """Trailing-window news sentiment for ``symbol`` as of ``on_date``.
+
+    Best-effort: returns ``None`` if scoring is unavailable so the gate fails
+    open (never blocks signal generation on a sentiment hiccup).
+    """
+    try:
+        from src.data_ingestion.finbert_scorer import symbol_sentiment
+        agg = symbol_sentiment(symbol, as_of=on_date, window_days=window_days)
+    except Exception as exc:  # noqa: BLE001 -- sentiment is an optional overlay
+        log.warning("sentiment lookup failed for {}: {}", symbol, exc)
+        return None
+    return agg if agg.get("available") else None
+
+
+def _sentiment_size_factor(score: float, cfg: SignalGenConfig) -> float:
+    """Map a signed sentiment score to a clamped position-size multiplier."""
+    raw = 1.0 + score * cfg.sentiment_size_weight
+    return max(cfg.sentiment_size_floor, min(cfg.sentiment_size_cap, raw))
+
+
 def _record_validation(conn: sqlite3.Connection, *, run_id: str, severity: str,
                        message: str, symbol: str | None = None) -> None:
     conn.execute(
@@ -296,6 +333,26 @@ def generate_signals(
                 )
                 continue
 
+            # News-sentiment gate (look-ahead safe; only news <= signal date).
+            s_score: float | None = None
+            s_label: str | None = None
+            size_factor = 1.0
+            if cfg.use_news_sentiment:
+                senti = _news_sentiment(sym, sd, cfg.sentiment_window_days)
+                if senti is not None:
+                    s_score = float(senti["score"])
+                    s_label = senti.get("label")
+                    if (int(senti.get("n", 0)) >= cfg.sentiment_min_headlines
+                            and s_score <= cfg.sentiment_veto_score):
+                        _record_validation(
+                            conn, run_id=cfg.log_run_id,
+                            severity="info", symbol=sym,
+                            message=(f"negative-news veto "
+                                     f"(score={s_score:.2f}, n={senti.get('n')})"),
+                        )
+                        continue
+                    size_factor = _sentiment_size_factor(s_score, cfg)
+
             entry = quote["close"]
             atr = quote["atr_14"]
             stop = cfg.risk.stop_for(entry, atr)
@@ -309,23 +366,35 @@ def generate_signals(
                 equity=cfg.equity,
                 cfg=cfg.sizing,
             )
-            if decision.qty <= 0:
+            # Apply the (clamped) sentiment multiplier to the sized quantity.
+            final_qty = int(decision.qty * size_factor) if size_factor != 1.0 \
+                else int(decision.qty)
+            if final_qty <= 0:
+                msg = (f"sizer returned qty=0 ({decision.rationale})"
+                       if decision.qty <= 0
+                       else f"sentiment shrank qty to 0 (factor={size_factor:.2f})")
                 _record_validation(
                     conn, run_id=cfg.log_run_id,
-                    severity="info", symbol=sym,
-                    message=f"sizer returned qty=0 ({decision.rationale})",
+                    severity="info", symbol=sym, message=msg,
                 )
                 continue
+
+            rationale = decision.rationale
+            if size_factor != 1.0:
+                rationale = f"{rationale}; sentiment x{size_factor:.2f}"
 
             payload = {
                 "raw_prob": cand["raw_prob"],
                 "calibrated_prob": cand["calibrated_prob"],
                 "atr_14": atr,
                 "sector": sector,
-                "sizing_rationale": decision.rationale,
+                "sizing_rationale": rationale,
                 "raw_kelly_qty": decision.raw_kelly_qty,
                 "raw_vol_qty": decision.raw_vol_qty,
                 "model_run_id": rid,
+                "news_sentiment": round(s_score, 4) if s_score is not None else None,
+                "news_label": s_label,
+                "sentiment_size_factor": round(size_factor, 3),
             }
 
             # INSERT OR IGNORE leverages the v4 unique index to make re-runs
@@ -337,7 +406,7 @@ def generate_signals(
                      qty, confidence, status, payload_json)
                 VALUES (?, ?, 'BUY', ?, ?, ?, ?, ?, 'pending', ?)
                 """,
-                (sym, sd, entry, stop, target, int(decision.qty),
+                (sym, sd, entry, stop, target, final_qty,
                  float(cand["calibrated_prob"]), json.dumps(payload, default=str)),
             )
             if cur.rowcount == 0:
@@ -347,12 +416,15 @@ def generate_signals(
             kept.append(GeneratedSignal(
                 symbol=sym, signal_date=sd, side="BUY",
                 entry_price=entry, stop_loss=stop, take_profit=target,
-                qty=int(decision.qty),
+                qty=final_qty,
                 confidence=float(cand["calibrated_prob"]),
                 sector=sector,
-                sizing_rationale=decision.rationale,
+                sizing_rationale=rationale,
                 raw_kelly_qty=decision.raw_kelly_qty,
                 raw_vol_qty=decision.raw_vol_qty,
+                news_sentiment=s_score,
+                news_label=s_label,
+                size_factor=size_factor,
             ))
 
     log.info(

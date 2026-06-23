@@ -183,6 +183,52 @@
   </div>
 </div>
 
+{# ---- Multi-horizon price targets (drift + volatility projection) ---- #}
+{% set fc = d.forecast %}
+{% if fc and fc.available %}
+<div class="rounded-xl bg-slate-900 border border-slate-800 p-4 mb-5">
+  <div class="flex items-center justify-between mb-3">
+    <h2 class="text-sm font-semibold text-slate-300">Price targets by horizon</h2>
+    <span class="text-[11px] text-slate-500">projection, not a guarantee</span>
+  </div>
+  <div class="overflow-x-auto">
+    <table class="w-full text-sm">
+      <thead>
+        <tr class="text-xs text-slate-400 border-b border-slate-800">
+          <th class="text-left font-medium py-1.5 pr-2">Horizon</th>
+          <th class="text-right font-medium py-1.5 px-2">Expected</th>
+          <th class="text-right font-medium py-1.5 px-2 hidden sm:table-cell">Range (1&sigma;)</th>
+          <th class="text-right font-medium py-1.5 px-2">Return</th>
+          <th class="text-right font-medium py-1.5 px-2">P(up)</th>
+          <th class="text-right font-medium py-1.5 pl-2">Outlook</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% set hlabels = {'1W':'1 week','1M':'1 month','3M':'3 months','6M':'6 months','1Y':'1 year','3Y':'long run (3y)'} %}
+        {% for h in fc.horizons %}
+        <tr class="border-b border-slate-800/60">
+          <td class="py-1.5 pr-2 text-slate-300">{{ hlabels.get(h.label, h.label) }}</td>
+          <td class="py-1.5 px-2 text-right font-semibold tabular-nums">{{ m.num(h.expected_price) }}</td>
+          <td class="py-1.5 px-2 text-right tabular-nums text-slate-400 hidden sm:table-cell text-xs">
+            {{ m.num(h.low_price) }} &ndash; {{ m.num(h.high_price) }}</td>
+          <td class="py-1.5 px-2 text-right tabular-nums {{ tone_text.get(h.tone, 'text-slate-300') }}">
+            {{ '%+.1f'|format(h.expected_return_pct) }}%</td>
+          <td class="py-1.5 px-2 text-right tabular-nums text-slate-400">{{ h.prob_up_pct|round(0)|int }}%</td>
+          <td class="py-1.5 pl-2 text-right">
+            <span class="text-[11px] px-2 py-0.5 rounded border {{ tone_chip.get(h.tone, tone_chip.neutral) }}">{{ h.verdict }}</span>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="text-[11px] text-slate-600 mt-2">
+    Projected from this stock's recent volatility ({{ fc.daily_vol_pct }}%/day) and trend, with momentum damped
+    and a conservative long-run drift taking over at longer horizons. The 1&sigma; range covers roughly the middle
+    two-thirds of outcomes &mdash; wider the further out you look. Not a guarantee or advice.</p>
+</div>
+{% endif %}
+
 {# ---- Profit-target feasibility (interactive slider) ---- #}
 <div class="rounded-xl bg-slate-900 border border-slate-800 p-4 mb-5"
      id="feasibility" data-symbol="{{ symbol }}"
@@ -310,7 +356,25 @@
 <div class="rounded-xl bg-slate-900 border border-slate-800 p-4 mb-5">
   <div class="flex items-center justify-between mb-3">
     <h2 class="text-sm font-semibold text-slate-300">Latest news &amp; headlines</h2>
-    <span class="text-[11px] text-slate-500">Google News &middot; auto-refreshed</span>
+    <div class="flex items-center gap-2">
+      {% set ns = d.news_sentiment %}
+      {% if ns and ns.available %}
+        {% if ns.label == 'positive' %}
+        <span class="text-[10px] px-1.5 py-0.5 rounded border bg-emerald-500/15 border-emerald-700 text-emerald-200"
+              title="Mean FinBERT sentiment over {{ ns.n }} headline(s), last {{ ns.window_days }}d">
+          News sentiment: Positive ({{ '%+.2f'|format(ns.score) }})</span>
+        {% elif ns.label == 'negative' %}
+        <span class="text-[10px] px-1.5 py-0.5 rounded border bg-rose-500/15 border-rose-700 text-rose-200"
+              title="Mean FinBERT sentiment over {{ ns.n }} headline(s), last {{ ns.window_days }}d">
+          News sentiment: Negative ({{ '%+.2f'|format(ns.score) }})</span>
+        {% else %}
+        <span class="text-[10px] px-1.5 py-0.5 rounded border bg-slate-700/40 border-slate-600 text-slate-300"
+              title="Mean FinBERT sentiment over {{ ns.n }} headline(s), last {{ ns.window_days }}d">
+          News sentiment: Neutral ({{ '%+.2f'|format(ns.score) }})</span>
+        {% endif %}
+      {% endif %}
+      <span class="text-[11px] text-slate-500">Google News &middot; auto-refreshed</span>
+    </div>
   </div>
 
   {% if d.corporate_events %}
@@ -335,6 +399,13 @@
           {{ n.publisher }}{% if n.published_date %} &middot; {{ n.published_date }}{% endif %}
         </div>
       </div>
+      {% if n.sentiment_label == 'positive' %}
+      <span class="shrink-0 text-[10px] px-1.5 py-0.5 rounded border bg-emerald-500/15 border-emerald-700 text-emerald-200"
+            title="FinBERT score {{ '%+.2f'|format(n.sentiment) }}">&#9650;</span>
+      {% elif n.sentiment_label == 'negative' %}
+      <span class="shrink-0 text-[10px] px-1.5 py-0.5 rounded border bg-rose-500/15 border-rose-700 text-rose-200"
+            title="FinBERT score {{ '%+.2f'|format(n.sentiment) }}">&#9660;</span>
+      {% endif %}
       {% if n.category == 'M&A' %}
       <span class="shrink-0 text-[10px] px-1.5 py-0.5 rounded border bg-fuchsia-500/15 border-fuchsia-700 text-fuchsia-200">M&amp;A</span>
       {% elif n.category == 'Corporate action' %}
